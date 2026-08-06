@@ -548,16 +548,15 @@ function renderVoters(d) {
 
   const effectiveOf = b => {
     if (!b) return null;
-    // 驱动实测 icl（wireless loop）优先：投票最小值可能包含模式专属票（如 wireless_qc）
-    if (b.icl !== undefined && b.icl !== null) {
-      return { client: "wireless loop icl", value: b.icl, calc: false, source: "icl" };
-    }
+    // MCA 驱动 effective vote is now 是唯一首选仲裁结果
     if (b.result) return { client: b.result.client, value: b.result.value, calc: false };
-    if (b.unit === "mA") {
+    // 只有已核实为 MIN/MAX 的 votable 才允许按投票表推算
+    if ((b.policy === "MIN" || b.policy === "MAX") && b.unit === "mA") {
       const enabled = (b.rows || []).filter(r => r.enable === 1);
       if (enabled.length) {
-        const min = enabled.reduce((a, b) => b.value < a.value ? b : a);
-        return { client: min.client, value: min.value, calc: true };
+        const pick = enabled.reduce((a, r) =>
+          b.policy === "MAX" ? (r.value > a.value ? r : a) : (r.value < a.value ? r : a));
+        return { client: pick.client, value: pick.value, calc: true };
       }
     }
     return null;
@@ -565,12 +564,24 @@ function renderVoters(d) {
   const summary = [];
   const addSummary = (label, eff, fmt) => {
     if (!eff) return;
-    const srcTip = eff.source === "icl" ? "驱动 wireless loop 实测 icl" :
-      eff.calc ? "驱动未输出 effective 行，按启用投票取最小值推算" : "驱动 effective 仲裁结果";
+    const srcTip = eff.calc
+      ? "驱动未输出 effective 行，按已核实 policy 推算"
+      : "驱动 effective vote is now 仲裁结果";
     summary.push(`<span class="chip" title="${srcTip}">` +
-      `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : eff.source === "icl" ? " · 实测" : ""}</small></span>`);
+      `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
   };
-  addSummary("无线输入限流", effectiveOf(topics.wireless_buck_input), v => `${v}mA`);
+  const buck = topics.wireless_buck_input;
+  const mcaEff = effectiveOf(buck);
+  addSummary("无线输入限流", mcaEff, v => `${v}mA`);
+  if (buck && buck.icl !== undefined && buck.icl !== null) {
+    const ago = buck.icl_at ? Math.max(0, Math.round((Date.now() - buck.icl_at) / 1000)) : null;
+    let diff = "";
+    if (mcaEff && mcaEff.value !== null && mcaEff.value !== undefined) {
+      diff = ` · Δ${buck.icl - mcaEff.value}mA`;
+    }
+    summary.push(`<span class="chip" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">` +
+      `实际下发 ICL<b>${buck.icl}</b><small>mA${ago !== null ? " · " + ago + "s前" : ""}${diff}</small></span>`);
+  }
   addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
   addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
@@ -607,22 +618,32 @@ function renderVoters(d) {
         `${unit ? `<small>${unit}</small>` : ""}</span>`;
     }).join("");
     const changedText = b.changed
-      ? ` · 最近变动 ${esc(b.changed.client)} → ${b.changed.value}`
+      ? ` · 最近变动 ${esc(b.changed.client)} ${b.changed.enabled ? "on" : "off"} → ${b.changed.value}${b.changed.time ? " @ " + b.changed.time : ""}`
       : "";
     let resultText = "";
     if (b.result) {
-      resultText = `<span class="vote-result">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}</span>`;
-    } else if (b.icl !== undefined && b.icl !== null) {
-      resultText = `<span class="vote-result" title="驱动 wireless loop 实测 icl">驱动实测 <b>${b.icl}</b>${b.unit || "mA"}</span>`;
-    } else if (b.unit === "mA" && rows.length) {
+      resultText = `<span class="vote-result" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +
+        `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}</span>`;
+    } else if ((b.policy === "MIN" || b.policy === "MAX") && b.unit === "mA" && rows.length) {
       const enabled = rows.filter(r => r.enable === 1);
       if (enabled.length) {
-        const min = enabled.reduce((a, b) => b.value < a.value ? b : a);
-        resultText = `<span class="vote-result calc" title="驱动未输出 effective 行，按启用投票取最小值推算">计算生效 <b>${esc(min.client)}</b> → ${min.value}${b.unit}</span>`;
+        const pick = enabled.reduce((a, r) =>
+          b.policy === "MAX" ? (r.value > a.value ? r : a) : (r.value < a.value ? r : a));
+        resultText = `<span class="vote-result calc" title="驱动未输出 effective 行，按已核实 policy=${b.policy} 推算">理论${b.policy} <b>${esc(pick.client)}</b> → ${pick.value}${b.unit}</span>`;
       }
+    } else if (!b.result) {
+      resultText = `<span class="vote-result calc" title="未捕获驱动 effective 行，且该主题仲裁类型未知，不做推算">未捕获驱动 effective 行</span>`;
+    }
+    let iclText = "";
+    if (b.icl !== undefined && b.icl !== null) {
+      const ago = b.icl_at ? Math.max(0, Math.round((Date.now() - b.icl_at) / 1000)) : null;
+      let diff = "";
+      if (b.result) diff = ` · Δ${b.icl - b.result.value}mA`;
+      iclText = `<span class="vote-result" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">实际下发 ICL <b>${b.icl}</b>mA` +
+        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}</small></span>`;
     }
     return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +
-      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}</div>` +
+      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
   el.innerHTML = summaryCard + cards;

@@ -57,6 +57,8 @@ public final class SnapshotCollector {
     private volatile String lastEpp = null;
     /** 驱动实测无线输入限流（wireless loop icl），比投票最小值推算更可信。 */
     private volatile Integer lastWlsIcl = null;
+    private volatile Long lastWlsIclAt = null;
+    private volatile String lastWlsIclLogTime = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private String lastError = "";
@@ -134,8 +136,12 @@ public final class SnapshotCollector {
                 if (sessions.length() > 0) lastSessions = sessions;
                 String epp = parseEpp(sessionLog);
                 if (epp != null) lastEpp = epp;
-                Integer icl = parseWlsIcl(sessionLog);
-                if (icl != null) lastWlsIcl = icl;
+                WlsIcl icl = parseWlsIcl(sessionLog);
+                if (icl != null) {
+                    lastWlsIcl = icl.value;
+                    lastWlsIclAt = icl.at;
+                    lastWlsIclLogTime = icl.logTime;
+                }
             }
             // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
             logsStale = !voteReadOk || !sessionReadOk;
@@ -153,7 +159,9 @@ public final class SnapshotCollector {
         if (lastEpp != null) appendEppNode(core, lastEpp);
         if (lastWlsIcl != null) {
             JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
-            if (buck != null) buck.put("icl", lastWlsIcl);
+            if (buck != null) buck.put("icl", lastWlsIcl)
+                    .put("icl_time", lastWlsIclLogTime == null ? "" : lastWlsIclLogTime)
+                    .put("icl_at", lastWlsIclAt == null ? 0L : lastWlsIclAt.longValue());
         }
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
         JSONObject meta = core.optJSONObject("meta");
@@ -378,7 +386,8 @@ public final class SnapshotCollector {
 
     // ---------------- 投票 ----------------
     private static final Pattern VOTE_TIME_RE = Pattern.compile("\\[(\\d{2}:\\d{2}:\\d{2}:\\d{3})");
-    private static final Pattern VOTE_CHANGED_RE = Pattern.compile("mca_vote:\\d+ (\\w+): ([A-Za-z0-9_.]+),(\\d+) voting on of val=(-?\\d+)");
+    private static final Pattern VOTE_CHANGED_RE = Pattern.compile(
+            "mca_vote:\\d+ (\\w+): ([A-Za-z0-9_.@:/\\-]+),(\\d+) voting (on|off) of val=(-?\\d+)");
     private static final Pattern VOTE_RESULT_RE = Pattern.compile("mca_vote:\\d+ (\\w+): effective vote is now (-?\\d+) voted by ([A-Za-z0-9_.]+),(\\d+)");
     private static final Pattern VOTE_HEADER_RE = Pattern.compile("mca_vote:\\d+ (\\w+) VOTER:");
     private static final Pattern VOTE_ROW_RE = Pattern.compile("(\\d+)\\.([A-Za-z0-9_.]+)\\s+(\\d+)\\s+(-?\\d+)");
@@ -389,25 +398,68 @@ public final class SnapshotCollector {
         VOTE_UNITS.put("quick_chg_disable", "");
         VOTE_UNITS.put("wls_quick_chg_disable", "");
     }
+    /** 已从 miro 固件 .ko 反汇编核实的仲裁类型：MIN/MAX/NONZERO/ZERO/UNKNOWN。 */
+    private static final java.util.Map<String, String> VOTE_POLICIES = new java.util.HashMap<>();
+    static {
+        // mca_basic_wireless.ko：mca_create_votable(..., 0, ...) 全部为 MIN
+        VOTE_POLICIES.put("wireless_buck_input", "MIN");
+        VOTE_POLICIES.put("wireless_bpp_in", "MIN");
+        VOTE_POLICIES.put("wireless_bppqc2_in", "MIN");
+        VOTE_POLICIES.put("wireless_bppqc3_in", "MIN");
+        VOTE_POLICIES.put("wireless_epp_in", "MIN");
+        VOTE_POLICIES.put("wireless_auth_20w", "MIN");
+        VOTE_POLICIES.put("wireless_auth_30w", "MIN");
+        VOTE_POLICIES.put("wireless_auth_50w", "MIN");
+        VOTE_POLICIES.put("wireless_auth_80w", "MIN");
+        VOTE_POLICIES.put("wireless_auth_voice_box", "MIN");
+        VOTE_POLICIES.put("wireless_auth_magnet_30w", "MIN");
+        VOTE_POLICIES.put("wireless_sw_qc_ich", "MIN");
+        VOTE_POLICIES.put("wireless_sw_thermal_ich", "MIN");
+        // mca_quick_wireless.ko：wls_single/multi_chg_cur 为 MIN，disable 为 type2（首个非零）
+        VOTE_POLICIES.put("wls_single_chg_cur", "MIN");
+        VOTE_POLICIES.put("wls_multi_chg_cur", "MIN");
+        VOTE_POLICIES.put("wls_quick_chg_disable", "NONZERO");
+        // mca_strategy_quickchg（反编译 C）：电流类 type0，disable type2，en type3（首个为零）
+        VOTE_POLICIES.put("quick_chg_disable", "NONZERO");
+        VOTE_POLICIES.put("quick_chg_en", "ZERO");
+        VOTE_POLICIES.put("div1_single", "MIN");
+        VOTE_POLICIES.put("div1_multi", "MIN");
+        VOTE_POLICIES.put("div2_single", "MIN");
+        VOTE_POLICIES.put("div2_multi", "MIN");
+        VOTE_POLICIES.put("div4_single", "MIN");
+        VOTE_POLICIES.put("div4_multi", "MIN");
+        VOTE_POLICIES.put("thermal_flip", "MIN");
+        VOTE_POLICIES.put("single_chg_cur", "MIN");
+        VOTE_POLICIES.put("multi_chg_cur", "MIN");
+    }
 
     private JSONObject parseVotes(String text) throws JSONException {
         JSONObject blocks = new JSONObject();
         JSONObject current = null;
-        JSONObject pendingChanged = null, pendingResult = null;
+        // 按主题分别保存最近一次变动/结果，避免日志交错时互相覆盖
+        java.util.Map<String, JSONObject> changesByTopic = new java.util.HashMap<>();
+        java.util.Map<String, JSONObject> resultsByTopic = new java.util.HashMap<>();
         for (String line : text.split("\n")) {
             Matcher m = VOTE_CHANGED_RE.matcher(line);
             if (m.find()) {
-                pendingChanged = new JSONObject()
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                String time = tm.find() ? shiftLogTime(tm.group(1)) : "";
+                changesByTopic.put(m.group(1), new JSONObject()
                         .put("topic", m.group(1)).put("client", m.group(2))
                         .put("idx", Integer.parseInt(m.group(3)))
-                        .put("value", Integer.parseInt(m.group(4)));
+                        .put("enabled", "on".equals(m.group(4)))
+                        .put("value", Integer.parseInt(m.group(5)))
+                        .put("time", time));
                 continue;
             }
             m = VOTE_RESULT_RE.matcher(line);
             if (m.find()) {
-                pendingResult = new JSONObject()
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                String time = tm.find() ? shiftLogTime(tm.group(1)) : "";
+                resultsByTopic.put(m.group(1), new JSONObject()
                         .put("topic", m.group(1)).put("value", Integer.parseInt(m.group(2)))
-                        .put("client", m.group(3)).put("idx", Integer.parseInt(m.group(4)));
+                        .put("client", m.group(3)).put("idx", Integer.parseInt(m.group(4)))
+                        .put("time", time));
                 continue;
             }
             m = VOTE_HEADER_RE.matcher(line);
@@ -418,14 +470,13 @@ public final class SnapshotCollector {
                 current = new JSONObject()
                         .put("topic", topic).put("time", time)
                         .put("unit", VOTE_UNITS.getOrDefault(topic, "mA"))
-                        .put("changed", pendingChanged != null && topic.equals(pendingChanged.optString("topic"))
-                                ? pendingChanged : JSONObject.NULL)
-                        .put("result", pendingResult != null && topic.equals(pendingResult.optString("topic"))
-                                ? pendingResult : JSONObject.NULL)
+                        .put("policy", VOTE_POLICIES.getOrDefault(topic, "UNKNOWN"))
+                        .put("changed", changesByTopic.get(topic) != null
+                                ? changesByTopic.get(topic) : JSONObject.NULL)
+                        .put("result", resultsByTopic.get(topic) != null
+                                ? resultsByTopic.get(topic) : JSONObject.NULL)
                         .put("rows", new JSONArray());
                 blocks.put(topic, current);
-                pendingChanged = null;
-                pendingResult = null;
                 continue;
             }
             if (current != null) {
@@ -562,11 +613,32 @@ public final class SnapshotCollector {
         return last;
     }
 
-    /** 取最新 wireless loop icl（驱动实际下发的无线输入限流）。 */
-    private Integer parseWlsIcl(String text) {
-        Integer last = null;
-        Matcher m = Pattern.compile("wireless loop: icl:(\\d+)").matcher(text);
-        while (m.find()) last = Integer.parseInt(m.group(1));
+    /** wireless loop icl 快照：值 + 日志本地时间 + 解析时刻（用于判断新旧）。 */
+    private static final class WlsIcl {
+        final int value;
+        final long at;
+        final String logTime;
+
+        WlsIcl(int value, long at, String logTime) {
+            this.value = value;
+            this.at = at;
+            this.logTime = logTime;
+        }
+    }
+
+    private static final Pattern WLS_ICL_RE =
+            Pattern.compile("wireless loop: icl:(\\d+)");
+
+    /** 取最新 wireless loop icl（驱动实际下发的无线输入限流），附带时间和采集时刻。 */
+    private WlsIcl parseWlsIcl(String text) {
+        WlsIcl last = null;
+        for (String line : text.split("\n")) {
+            Matcher m = WLS_ICL_RE.matcher(line);
+            if (!m.find()) continue;
+            Matcher tm = VOTE_TIME_RE.matcher(line);
+            String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
+            last = new WlsIcl(Integer.parseInt(m.group(1)), System.currentTimeMillis(), logTime);
+        }
         return last;
     }
 

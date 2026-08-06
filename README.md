@@ -12,6 +12,10 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 私有快充协商（quick_charge_type / power_max / EPP 协商状态）
 - 无线/有线热控实时数据（无线热控限流、有线热控等级、热控档位投票）
 - 电流投票实时表 + **总仲裁结果**（生效客户、最终值、推算值）
+- MCA 仲裁展示修正：驱动 `effective vote is now` 优先，`wireless loop: icl` 单独显示为“实际下发 ICL”，不再混为一谈
+- 每个 votable 标注已核实的仲裁类型（MIN/MAX/NONZERO/ZERO），未知类型不做盲目推算
+- 投票解析支持 `voting on/off`，并按主题分别缓存最近变动与结果，避免日志交错串线
+- ICL 带日志时间与采集时刻，旧会话残留一目了然
 - 实时会话档案（插拔 / 私有认证 / 快充协商 / SmartEndura 介入）
 - 实时曲线（输入功率、电池电流、vout、iout）
 - 虚拟温度与生效场景（来自 mi_thermald thermal.dump）
@@ -31,6 +35,21 @@ gradle assembleDebug
 ```
 
 产物：`app/build/outputs/apk/debug/app-debug.apk`
+
+## 仲裁展示说明
+
+首页“总仲裁结果”里的 **无线输入限流** 表示 MCA 驱动的逻辑仲裁结果（来源为内核日志
+`effective vote is now ...`）；**实际下发 ICL** 表示 `wireless loop: icl:` 打印的、
+经过协议/硬件/保护逻辑处理后的真实下发值。两者含义不同，页面会同时展示并给出差值。
+
+投票类型来自对 miro 固件 `mca_*.ko` 的反汇编核实，而非按单位猜测：
+
+| 类型 | 含义 | 已核实的 votable 示例 |
+|---|---|---|
+| MIN | 启用票中取最小 | wireless_buck_input、wireless_*_in、wireless_sw_*_ich、wls_single/multi_chg_cur、div*、single/multi_chg_cur |
+| NONZERO | 首个启用且非零的投票 | quick_chg_disable、wls_quick_chg_disable |
+| ZERO | 首个启用且为零的投票 | quick_chg_en |
+| UNKNOWN | 未核实，不做推算 | 其余主题 |
 
 ## 数据来源（设备内，无需 ADB）
 
