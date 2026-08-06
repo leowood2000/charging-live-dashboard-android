@@ -55,6 +55,11 @@ public class MainActivity extends Activity {
         slowScheduler.scheduleWithFixedDelay(() -> {
             if (!active) return;
             collector.collectLogs();
+            // 日志完成后立即通知页面刷新，不等下一轮快速采集
+            ui.post(() -> {
+                if (webView != null) webView.evaluateJavascript(
+                        "window.__onSnapshot && window.__onSnapshot();", null);
+            });
         }, 2, 20, TimeUnit.SECONDS);
     }
 

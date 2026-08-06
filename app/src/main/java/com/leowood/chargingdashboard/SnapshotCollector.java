@@ -55,6 +55,8 @@ public final class SnapshotCollector {
     private volatile JSONObject lastVoters = new JSONObject();
     private volatile JSONArray lastSessions = new JSONArray();
     private volatile String lastEpp = null;
+    private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
+    private volatile boolean logsStale = false;
     private String lastError = "";
     private boolean rootOk = false;
     private final int utcOffsetMinutes = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
@@ -86,10 +88,6 @@ public final class SnapshotCollector {
             JSONObject parsed = build(batch);
             parsed.put("mode", "live");
             parsed.put("connected", true);
-            // 合并上次慢速日志结果，避免每 3 秒重扫日志
-            parsed.put("voters", lastVoters);
-            parsed.put("sessions", lastSessions);
-            if (lastEpp != null) appendEppNode(parsed, lastEpp);
             parsed.put("thermal", parseThermalDump(
                     RootShell.exec("tail -c 65536 " + THERMAL_DUMP
                             + " | grep -a -E 'MONITOR-WIRELESS' | tail -n 3", 15)));
@@ -108,7 +106,7 @@ public final class SnapshotCollector {
                 while (history.size() > HISTORY_MAX) history.removeFirst();
                 parsed.put("history", new JSONArray(new ArrayList<>(history)));
             }
-            snapshotJson = parsed.toString();
+            publishSnapshot(parsed);
         } catch (Exception e) {
             lastError = "采集异常: " + e.getMessage();
             snapshotJson = errorSnapshot(lastError).toString();
@@ -120,23 +118,37 @@ public final class SnapshotCollector {
         try {
             String voteLog = readVoteLogs();
             Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
-            lastVoters = parseVotes(voteLog);
+            // 临时失败时保留上次成功结果，不清空已有数据
+            if (!voteLog.isEmpty()) {
+                JSONObject voters = parseVotes(voteLog);
+                if (voters.length() > 0) lastVoters = voters;
+            }
             String sessionLog = readSessionLogs();
-            lastSessions = parseSessions(sessionLog);
-            lastEpp = parseEpp(sessionLog);
+            if (!sessionLog.isEmpty()) {
+                JSONArray sessions = parseSessions(sessionLog);
+                if (sessions.length() > 0) lastSessions = sessions;
+                String epp = parseEpp(sessionLog);
+                if (epp != null) lastEpp = epp;
+            }
+            logsStale = voteLog.isEmpty() || sessionLog.isEmpty();
+            lastLogsUpdatedAt = System.currentTimeMillis();
             publishLogs();
         } catch (Exception e) {
             Log.w("ChargeDashboard", "collectLogs failed: " + e.getMessage());
         }
     }
 
-    /** 将最新日志结果合并进当前快照并发布（只在写最终字符串时短暂同步）。 */
+    /** 统一发布入口：快/慢采集都经此写 snapshotJson，避免互相覆盖。 */
+    private synchronized void publishSnapshot(JSONObject core) throws JSONException {
+        core.put("voters", lastVoters);
+        core.put("sessions", lastSessions);
+        if (lastEpp != null) appendEppNode(core, lastEpp);
+        snapshotJson = core.toString();
+    }
+
     private synchronized void publishLogs() throws JSONException {
         JSONObject cur = new JSONObject(snapshotJson);
-        cur.put("voters", lastVoters);
-        cur.put("sessions", lastSessions);
-        if (lastEpp != null) appendEppNode(cur, lastEpp);
-        snapshotJson = cur.toString();
+        publishSnapshot(cur);
     }
 
     private static void appendEppNode(JSONObject parsed, String epp) throws JSONException {
@@ -253,7 +265,17 @@ public final class SnapshotCollector {
 
         JSONObject wlsNode = nodesObj.optJSONObject("wls_debug");
         JSONObject wls = parseWlsDebug(wlsNode == null ? "" : wlsNode.optString("value"));
-        double battCurMa = optNum(batteryRaw, "CURRENT_NOW") / 1000.0;
+        // 统一符号：充电为正、放电为负（AOSP 约定，不依赖厂商原始符号）
+        double rawBattCurMa = optNum(batteryRaw, "CURRENT_NOW") / 1000.0;
+        String battStatus = batteryRaw.optString("STATUS", "");
+        double battCurMa = rawBattCurMa;
+        if (Double.isFinite(rawBattCurMa)) {
+            if ("Charging".equalsIgnoreCase(battStatus)) {
+                battCurMa = Math.abs(rawBattCurMa);
+            } else if ("Discharging".equalsIgnoreCase(battStatus)) {
+                battCurMa = -Math.abs(rawBattCurMa);
+            }
+        }
         double battVolMv = optNum(batteryRaw, "VOLTAGE_NOW") / 1000.0;
         double tempC = optNum(batteryRaw, "TEMP") / 10.0;
         double capacity = optNum(batteryRaw, "CAPACITY");
@@ -265,7 +287,7 @@ public final class SnapshotCollector {
         putFinite(derived, "vrect", wls.optDouble("vrect", Double.NaN));
         putFinite(derived, "iout", iout);
         putFinite(derived, "input_power_w", vout * iout / 1e6);
-        putFinite(derived, "battery_power_w", Math.abs(battCurMa) * battVolMv / 1e6);
+        putFinite(derived, "battery_power_w", battCurMa * battVolMv / 1e6);
         putFinite(derived, "batt_current_ma", battCurMa);
         putFinite(derived, "batt_voltage_mv", battVolMv);
         putFinite(derived, "capacity", capacity);
@@ -288,7 +310,12 @@ public final class SnapshotCollector {
                 .put("battery", battery)
                 .put("derived", derived)
                 .put("meta", new JSONObject()
-                        .put("interval", 3).put("adb", "root-direct"));
+                        .put("interval", 3)
+                        .put("fast_interval", 3)
+                        .put("logs_interval", 20)
+                        .put("logs_updated_at", lastLogsUpdatedAt)
+                        .put("logs_stale", logsStale)
+                        .put("adb", "root-direct"));
     }
 
     private static double optNum(JSONObject o, String key) {
