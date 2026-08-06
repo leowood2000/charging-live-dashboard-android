@@ -51,27 +51,28 @@ public final class SnapshotCollector {
     private final Deque<JSONObject> history = new ArrayDeque<>();
     /** 无锁读取的快照字符串；首次即返回 loading 状态，避免启动黑屏等待采集锁。 */
     private volatile String snapshotJson = null;
-    private JSONObject lastVoters = new JSONObject();
-    private JSONArray lastSessions = new JSONArray();
-    private String lastEpp = null;
+    /** 慢速日志结果由 collectLogs 独占写入、collectFast 只读，volatile 保证可见性。 */
+    private volatile JSONObject lastVoters = new JSONObject();
+    private volatile JSONArray lastSessions = new JSONArray();
+    private volatile String lastEpp = null;
     private String lastError = "";
     private boolean rootOk = false;
     private final int utcOffsetMinutes = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
 
     public String getSnapshotJson() {
         if (snapshotJson == null) {
-            snapshotJson = errorSnapshot("正在申请 root 权限并采集数据").toString();
+            snapshotJson = loadingSnapshot().toString();
         }
         return snapshotJson;
     }
 
     /** 快速采集：sysfs + battery + thermal.dump + history，每 3 秒一次。 */
-    public synchronized void collectFast() {
+    public void collectFast() {
         if (!rootOk) {
             rootOk = RootShell.isRootAvailable();
             if (!rootOk) {
                 lastError = "需要 root 权限（KernelSU / Magisk）";
-                snapshotJson = errorSnapshot(lastError).toString();
+                snapshotJson = loadingSnapshot(lastError).toString();
                 return;
             }
         }
@@ -79,7 +80,7 @@ public final class SnapshotCollector {
             String batch = readBatch();
             if (batch.isEmpty()) {
                 lastError = "sysfs 读取失败（su 返回空）";
-                snapshotJson = errorSnapshot(lastError).toString();
+                snapshotJson = loadingSnapshot(lastError).toString();
                 return;
             }
             JSONObject parsed = build(batch);
@@ -115,7 +116,7 @@ public final class SnapshotCollector {
     }
 
     /** 慢速采集：投票 + 会话 + EPP，每 20 秒一次，避免高频重扫十几 MB 日志。 */
-    public synchronized void collectLogs() {
+    public void collectLogs() {
         try {
             String voteLog = readVoteLogs();
             Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
@@ -123,15 +124,19 @@ public final class SnapshotCollector {
             String sessionLog = readSessionLogs();
             lastSessions = parseSessions(sessionLog);
             lastEpp = parseEpp(sessionLog);
-            // 立即合并进已发布快照（投票/会话/EPP）
-            JSONObject cur = new JSONObject(snapshotJson);
-            cur.put("voters", lastVoters);
-            cur.put("sessions", lastSessions);
-            if (lastEpp != null) appendEppNode(cur, lastEpp);
-            snapshotJson = cur.toString();
+            publishLogs();
         } catch (Exception e) {
             Log.w("ChargeDashboard", "collectLogs failed: " + e.getMessage());
         }
+    }
+
+    /** 将最新日志结果合并进当前快照并发布（只在写最终字符串时短暂同步）。 */
+    private synchronized void publishLogs() throws JSONException {
+        JSONObject cur = new JSONObject(snapshotJson);
+        cur.put("voters", lastVoters);
+        cur.put("sessions", lastSessions);
+        if (lastEpp != null) appendEppNode(cur, lastEpp);
+        snapshotJson = cur.toString();
     }
 
     private static void appendEppNode(JSONObject parsed, String epp) throws JSONException {
@@ -149,10 +154,22 @@ public final class SnapshotCollector {
     }
 
     private JSONObject errorSnapshot(String msg) {
+        return baseSnapshot("offline", msg);
+    }
+
+    private JSONObject loadingSnapshot() {
+        return baseSnapshot("loading", "正在申请 root 权限并采集数据");
+    }
+
+    private JSONObject loadingSnapshot(String msg) {
+        return baseSnapshot("loading", msg);
+    }
+
+    private JSONObject baseSnapshot(String mode, String msg) {
         JSONObject o = new JSONObject();
         try {
             o.put("ts", System.currentTimeMillis() / 1000.0)
-                    .put("iso", isoNow()).put("mode", "offline")
+                    .put("iso", isoNow()).put("mode", mode)
                     .put("connected", false).put("error", msg)
                     .put("nodes", new JSONArray()).put("battery", new JSONObject())
                     .put("derived", new JSONObject()).put("history", new JSONArray())
@@ -173,10 +190,11 @@ public final class SnapshotCollector {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < NODES.length; i++) {
             sb.append("echo '###").append(i).append("'; cat '")
-                    .append("/sys/devices/platform/soc/").append(NODES[i][1]).append("'; ");
+                    .append("/sys/devices/platform/soc/").append(NODES[i][1])
+                    .append("' 2>/dev/null; ");
         }
         sb.append("echo '###").append(NODES.length).append("'; cat '")
-                .append(BATTERY_UEVENT).append("'");
+                .append(BATTERY_UEVENT).append("' 2>/dev/null");
         return RootShell.exec(sb.toString(), 20);
     }
 
@@ -192,9 +210,12 @@ public final class SnapshotCollector {
         if (files.isEmpty()) return "";
         String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable";
         StringBuilder script = new StringBuilder();
-        for (String f : files.split("\n")) {
+        String[] logFiles = files.split("\n");
+        // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
+        for (int i = logFiles.length - 1; i >= 0; i--) {
+            String f = logFiles[i].trim();
             if (!f.matches("[A-Za-z0-9_.\\-]+")) continue;
-            script.append("tail -c 4194304 ").append(MCA_LOG_DIR).append('/').append(f.trim())
+            script.append("tail -c 4194304 ").append(MCA_LOG_DIR).append('/').append(f)
                     .append(" | grep -a -E '").append(pattern)
                     .append("' | grep -v sysfs_show; ");
         }

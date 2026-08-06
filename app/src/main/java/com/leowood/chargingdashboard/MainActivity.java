@@ -23,6 +23,8 @@ public class MainActivity extends Activity {
     private final ScheduledExecutorService fastScheduler = Executors.newSingleThreadScheduledExecutor();
     private final ScheduledExecutorService slowScheduler = Executors.newSingleThreadScheduledExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
+    /** App 在前台时才采集，后台/锁屏停止 root 读写，避免耗电。 */
+    private volatile boolean active = true;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -42,6 +44,7 @@ public class MainActivity extends Activity {
 
         // 快速数据：sysfs/battery/thermal 每 3 秒（固定延迟，避免积压）
         fastScheduler.scheduleWithFixedDelay(() -> {
+            if (!active) return;
             collector.collectFast();
             ui.post(() -> {
                 if (webView != null) webView.evaluateJavascript(
@@ -49,12 +52,15 @@ public class MainActivity extends Activity {
             });
         }, 0, 3, TimeUnit.SECONDS);
         // 慢速日志：投票/会话/EPP 每 20 秒
-        slowScheduler.scheduleWithFixedDelay(
-                collector::collectLogs, 2, 20, TimeUnit.SECONDS);
+        slowScheduler.scheduleWithFixedDelay(() -> {
+            if (!active) return;
+            collector.collectLogs();
+        }, 2, 20, TimeUnit.SECONDS);
     }
 
     @Override
     protected void onPause() {
+        active = false;
         if (webView != null) webView.onPause();
         super.onPause();
     }
@@ -62,6 +68,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        active = true;
         if (webView != null) webView.onResume();
     }
 

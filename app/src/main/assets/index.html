@@ -42,6 +42,7 @@
   }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
   .dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.loading { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
   .dot.offline { background: var(--red); box-shadow: 0 0 8px var(--red); }
   .spacer { flex: 1; }
   .meta { color: var(--muted); font-size: 12px; }
@@ -294,10 +295,10 @@
     </div>
   </section>
 
-  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 3 秒刷新</span></div>
+  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 20 秒刷新</span></div>
   <section class="grid" id="voteTopics" aria-label="电流投票实时表"></section>
 
-  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 3 秒刷新</span></div>
+  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 20 秒刷新</span></div>
   <section class="grid" id="liveSessions" aria-label="实时会话档案"></section>
 
   <details id="rawDetails">
@@ -329,6 +330,9 @@ let pollMs = DEFAULT_POLL_MS;
 let lastFetchAt = 0;
 let timer = null;
 const lastValues = {};
+let lastGroupsJson = "";
+let lastVotersJson = "";
+let lastSessionsJson = "";
 
 const KPI = [
   { id: "input_power_w", label: "无线输入功率", unit: "W", digits: 2, hint: "vout × iout（典型 15–17W）" },
@@ -380,7 +384,7 @@ function flash(id, value) {
 }
 
 function setStatus(mode, text) {
-  $("statusDot").className = "dot " + (mode === "live" ? "live" : "offline");
+  $("statusDot").className = "dot " + (mode === "live" ? "live" : mode === "loading" ? "loading" : "offline");
   $("statusText").textContent = text;
 }
 
@@ -390,7 +394,7 @@ function renderOffline(data) {
   const banner = $("offlineBanner");
   banner.classList.add("show");
   banner.textContent = "采集失败：" + (data.error || "未知错误") +
-    "。当前不显示任何伪造数据，请检查 ADB 连接后页面会自动恢复。";
+    "。当前不显示任何伪造数据，请确认已在 KernelSU/Magisk 中授权后重新打开。";
   $("metaDevice").textContent = data.meta && data.meta.adb ? data.meta.adb : "-";
   $("metaInterval").textContent = data.meta ? data.meta.interval : "3";
   $("lastUpdate").textContent = data.iso || "-";
@@ -700,16 +704,41 @@ function render(data) {
   }
   $("offlineBanner").classList.remove("show");
 
+  if (data.mode === "loading") {
+    setStatus("loading", "正在获取 root 权限");
+    const banner = $("offlineBanner");
+    banner.classList.add("show");
+    banner.textContent = data.error || "正在初始化采集…";
+    $("kpis").innerHTML = KPI.map(k =>
+      `<div class="kpi"><div class="label">${k.label}</div><div class="value empty">--</div></div>`).join("");
+    $("groups").innerHTML = "";
+    $("voteTopics").innerHTML = "";
+    $("liveSessions").innerHTML = "";
+    return;
+  }
+
   if (data.mode !== "live" || !data.connected) {
     renderOffline(data);
     return;
   }
   setStatus("live", "实时采集");
   renderKpis(data.derived || {});
-  renderGroups(data);
-  renderVoters(data);
+  const groupsJson = JSON.stringify({ nodes: data.nodes, battery: data.battery });
+  if (groupsJson !== lastGroupsJson) {
+    lastGroupsJson = groupsJson;
+    renderGroups(data);
+  }
+  const votersJson = JSON.stringify(data.voters || {});
+  if (votersJson !== lastVotersJson) {
+    lastVotersJson = votersJson;
+    renderVoters(data);
+  }
   renderCharts(data);
-  renderSessions(data);
+  const sessionsJson = JSON.stringify(data.sessions || []);
+  if (sessionsJson !== lastSessionsJson) {
+    lastSessionsJson = sessionsJson;
+    renderSessions(data);
+  }
 }
 
 async function load() {
