@@ -45,24 +45,33 @@ public final class SnapshotCollector {
 
     private static final String BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent";
     private static final int HISTORY_MAX = 180;
+    private static final int SESSION_MAX = 5;
+    private static final int SESSION_EVENT_MAX = 100;
 
     private final Deque<JSONObject> history = new ArrayDeque<>();
-    private JSONObject snapshot = null;
+    /** 无锁读取的快照字符串；首次即返回 loading 状态，避免启动黑屏等待采集锁。 */
+    private volatile String snapshotJson = null;
+    private JSONObject lastVoters = new JSONObject();
+    private JSONArray lastSessions = new JSONArray();
+    private String lastEpp = null;
     private String lastError = "";
     private boolean rootOk = false;
     private final int utcOffsetMinutes = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
 
-    public synchronized JSONObject getSnapshot() {
-        if (snapshot == null) return errorSnapshot("尚未完成首次采集");
-        return snapshot;
+    public String getSnapshotJson() {
+        if (snapshotJson == null) {
+            snapshotJson = errorSnapshot("正在申请 root 权限并采集数据").toString();
+        }
+        return snapshotJson;
     }
 
-    public synchronized void collect() {
+    /** 快速采集：sysfs + battery + thermal.dump + history，每 3 秒一次。 */
+    public synchronized void collectFast() {
         if (!rootOk) {
             rootOk = RootShell.isRootAvailable();
             if (!rootOk) {
                 lastError = "需要 root 权限（KernelSU / Magisk）";
-                snapshot = errorSnapshot(lastError);
+                snapshotJson = errorSnapshot(lastError).toString();
                 return;
             }
         }
@@ -70,25 +79,16 @@ public final class SnapshotCollector {
             String batch = readBatch();
             if (batch.isEmpty()) {
                 lastError = "sysfs 读取失败（su 返回空）";
-                snapshot = errorSnapshot(lastError);
+                snapshotJson = errorSnapshot(lastError).toString();
                 return;
             }
             JSONObject parsed = build(batch);
             parsed.put("mode", "live");
             parsed.put("connected", true);
-            String voteLog = readVoteLogs();
-            Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
-            parsed.put("voters", parseVotes(voteLog));
-            String sessionLog = readSessionLogs();
-            parsed.put("sessions", parseSessions(sessionLog));
-            String epp = parseEpp(sessionLog);
-            if (epp != null) {
-                JSONArray nodes = parsed.getJSONArray("nodes");
-                nodes.put(new JSONObject()
-                        .put("id", "epp").put("label", "EPP 协商状态")
-                        .put("group", "无线策略实时").put("unit", "")
-                        .put("fmt", "epp").put("value", epp).put("ok", true));
-            }
+            // 合并上次慢速日志结果，避免每 3 秒重扫日志
+            parsed.put("voters", lastVoters);
+            parsed.put("sessions", lastSessions);
+            if (lastEpp != null) appendEppNode(parsed, lastEpp);
             parsed.put("thermal", parseThermalDump(
                     RootShell.exec("tail -c 65536 " + THERMAL_DUMP
                             + " | grep -a -E 'MONITOR-WIRELESS' | tail -n 3", 15)));
@@ -107,11 +107,45 @@ public final class SnapshotCollector {
                 while (history.size() > HISTORY_MAX) history.removeFirst();
                 parsed.put("history", new JSONArray(new ArrayList<>(history)));
             }
-            snapshot = parsed;
+            snapshotJson = parsed.toString();
         } catch (Exception e) {
             lastError = "采集异常: " + e.getMessage();
-            snapshot = errorSnapshot(lastError);
+            snapshotJson = errorSnapshot(lastError).toString();
         }
+    }
+
+    /** 慢速采集：投票 + 会话 + EPP，每 20 秒一次，避免高频重扫十几 MB 日志。 */
+    public synchronized void collectLogs() {
+        try {
+            String voteLog = readVoteLogs();
+            Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
+            lastVoters = parseVotes(voteLog);
+            String sessionLog = readSessionLogs();
+            lastSessions = parseSessions(sessionLog);
+            lastEpp = parseEpp(sessionLog);
+            // 立即合并进已发布快照（投票/会话/EPP）
+            JSONObject cur = new JSONObject(snapshotJson);
+            cur.put("voters", lastVoters);
+            cur.put("sessions", lastSessions);
+            if (lastEpp != null) appendEppNode(cur, lastEpp);
+            snapshotJson = cur.toString();
+        } catch (Exception e) {
+            Log.w("ChargeDashboard", "collectLogs failed: " + e.getMessage());
+        }
+    }
+
+    private static void appendEppNode(JSONObject parsed, String epp) throws JSONException {
+        JSONArray nodes = parsed.getJSONArray("nodes");
+        for (int i = 0; i < nodes.length(); i++) {
+            if ("epp".equals(nodes.getJSONObject(i).optString("id"))) {
+                nodes.getJSONObject(i).put("value", epp).put("ok", true);
+                return;
+            }
+        }
+        nodes.put(new JSONObject()
+                .put("id", "epp").put("label", "EPP 协商状态")
+                .put("group", "无线策略实时").put("unit", "")
+                .put("fmt", "epp").put("value", epp).put("ok", true));
     }
 
     private JSONObject errorSnapshot(String msg) {
@@ -191,8 +225,8 @@ public final class SnapshotCollector {
             String v = item == null ? "" : item.optString("value");
             boolean ok = item != null && item.optBoolean("ok");
             nodeList.put(new JSONObject()
-                    .put("id", n[0]).put("label", n[1]).put("group", n[2])
-                    .put("unit", n[3]).put("fmt", n[4])
+                    .put("id", n[0]).put("label", n[2]).put("group", n[3])
+                    .put("unit", n[4]).put("fmt", n[5])
                     .put("value", v).put("ok", ok));
         }
 
@@ -220,7 +254,7 @@ public final class SnapshotCollector {
         JSONObject battery = new JSONObject();
         for (String k : new String[]{"current_now", "voltage_now", "capacity", "temp",
                 "status", "health", "cycle_count", "charge_full", "technology",
-                "charge_counter", "input_current_limit", "time_to_full_now",
+                "charge_counter", "input_current_limit", "time_to_full_now", "voltage_max_design",
                 "model_name", "present", "capacity_level"}) {
             String v = batteryRaw.optString(k.toUpperCase(Locale.ROOT), "");
             battery.put(k, new JSONObject().put("raw", v).put("value", v).put("ok", !v.isEmpty()));
@@ -364,13 +398,17 @@ public final class SnapshotCollector {
                     if (t.find()) { kind = "tx"; detail = "TX_ADAPTER=" + t.group(1); }
                     else if (line.contains("RX_INT_FAST_CHARGE")) kind = "fc";
                     else {
-                        Matcher c = ICHG_RE.matcher(line);
-                        if (c.find()) { kind = "ichg"; detail = c.group(1); }
+                        Matcher f = Pattern.compile("fast chg success: (\\d+)").matcher(line);
+                        if (f.find()) { kind = "fcflag"; detail = f.group(1); }
                         else {
-                            Matcher o = OPEN_RE.matcher(line);
-                            if (o.find()) { kind = "open"; detail = o.group(1); }
-                            else if (line.contains("smartchg_soc_limit_callback")
-                                    && line.contains("effective_result: 1")) kind = "smart";
+                            Matcher c = ICHG_RE.matcher(line);
+                            if (c.find()) { kind = "ichg"; detail = c.group(1); }
+                            else {
+                                Matcher o = OPEN_RE.matcher(line);
+                                if (o.find()) { kind = "open"; detail = o.group(1); }
+                                else if (line.contains("smartchg_soc_limit_callback")
+                                        && line.contains("effective_result: 1")) kind = "smart";
+                            }
                         }
                     }
                 }
@@ -403,6 +441,9 @@ public final class SnapshotCollector {
                 ev.put(event(line, "tx", "发射端识别", detail));
             } else if (kind.equals("fc")) {
                 ev.put(event(line, "fc", "快充协商成功", ""));
+            } else if (kind.equals("fcflag")) {
+                cur.put("fc_flag", detail);
+                ev.put(event(line, "fcflag", "快充成功标志", detail));
             } else if (kind.equals("ichg")) {
                 ev.put(event(line, "ichg", "设置充电电流", detail));
                 int v = Integer.parseInt(detail);
@@ -416,6 +457,12 @@ public final class SnapshotCollector {
                 cur.put("smartendura", true);
                 ev.put(event(line, "smart", "SmartEndura 介入", ""));
             }
+        }
+        // 限制会话数量与事件数量，避免长期运行后 DOM/内存膨胀
+        while (sessions.length() > SESSION_MAX) sessions.remove(0);
+        for (int i = 0; i < sessions.length(); i++) {
+            JSONArray evs = sessions.getJSONObject(i).getJSONArray("events");
+            while (evs.length() > SESSION_EVENT_MAX) evs.remove(0);
         }
         return sessions;
     }

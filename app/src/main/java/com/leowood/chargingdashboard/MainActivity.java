@@ -20,7 +20,8 @@ import java.util.concurrent.TimeUnit;
 public class MainActivity extends Activity {
     private WebView webView;
     private final SnapshotCollector collector = new SnapshotCollector();
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService fastScheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService slowScheduler = Executors.newSingleThreadScheduledExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -32,8 +33,6 @@ public class MainActivity extends Activity {
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        s.setLoadWithOverviewMode(true);
-        s.setUseWideViewPort(true);
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         webView.setWebViewClient(new WebViewClient());
         webView.setWebChromeClient(new WebChromeClient());
@@ -41,16 +40,35 @@ public class MainActivity extends Activity {
         setContentView(webView);
         webView.loadUrl("file:///android_asset/index.html");
 
-        scheduler.scheduleAtFixedRate(() -> {
-            collector.collect();
-            ui.post(() -> webView.evaluateJavascript(
-                    "window.__onSnapshot && window.__onSnapshot();", null));
+        // 快速数据：sysfs/battery/thermal 每 3 秒（固定延迟，避免积压）
+        fastScheduler.scheduleWithFixedDelay(() -> {
+            collector.collectFast();
+            ui.post(() -> {
+                if (webView != null) webView.evaluateJavascript(
+                        "window.__onSnapshot && window.__onSnapshot();", null);
+            });
         }, 0, 3, TimeUnit.SECONDS);
+        // 慢速日志：投票/会话/EPP 每 20 秒
+        slowScheduler.scheduleWithFixedDelay(
+                collector::collectLogs, 2, 20, TimeUnit.SECONDS);
+    }
+
+    @Override
+    protected void onPause() {
+        if (webView != null) webView.onPause();
+        super.onPause();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) webView.onResume();
     }
 
     @Override
     protected void onDestroy() {
-        scheduler.shutdownNow();
+        fastScheduler.shutdownNow();
+        slowScheduler.shutdownNow();
         if (webView != null) {
             webView.destroy();
             webView = null;
@@ -60,9 +78,8 @@ public class MainActivity extends Activity {
 
     private class Bridge {
         @JavascriptInterface
-        public String getSnapshot() {
-            JSONObject o = collector.getSnapshot();
-            return o == null ? "{}" : o.toString();
+        public String getSnapshotJson() {
+            return collector.getSnapshotJson();
         }
     }
 }
