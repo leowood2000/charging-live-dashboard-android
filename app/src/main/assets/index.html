@@ -336,6 +336,7 @@ const lastValues = {};
 let lastGroupsJson = "";
 let lastVotersJson = "";
 let lastSessionsJson = "";
+let lastGroupsStruct = "";
 
 const KPI = [
   { id: "input_power_w", label: "无线输入功率", unit: "W", digits: 2, hint: "vout × iout（典型 15–17W）" },
@@ -405,6 +406,7 @@ function renderOffline(data) {
   $("kpis").innerHTML = KPI.map(k =>
     `<div class="kpi"><div class="label">${k.label}</div><div class="value empty">--</div></div>`).join("");
   $("groups").innerHTML = "";
+  lastGroupsStruct = "";
   $("voteTopics").innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">离线</span></h2>` +
     `<p class="note">设备离线，暂无投票数据。</p></div>`;
   $("liveSessions").innerHTML = `<div class="card"><h2>实时会话档案<span class="tag">离线</span></h2>` +
@@ -429,7 +431,7 @@ function renderKpis(d) {
   KPI.forEach(k => flash("kpi-" + k.id, d[k.id]));
 }
 
-function renderNode(node) {
+function renderNodeBody(node) {
   let body = `<span class="empty">不可读</span>`;
   if (node.ok && node.value) {
     if (node.fmt === "wls") {
@@ -453,12 +455,58 @@ function renderNode(node) {
       body = `<span>${esc(node.value)}</span>`;
     }
   }
+  return body;
+}
+
+function renderNode(node) {
   const wide = node.fmt === "wls" || node.fmt === "ichg" ? " wide" : "";
   return `<div class="tile${wide}"><div class="k">${esc(node.label)}</div>` +
-    `<div class="v" data-node="${node.id}">${body}</div></div>`;
+    `<div class="v" data-node="${node.id}">${renderNodeBody(node)}</div></div>`;
 }
 
 function renderGroups(d) {
+  // 结构签名：分组/节点/电池字段是否变化；值变化不走这里（增量更新）
+  const struct = JSON.stringify({
+    groups: d.nodes.map(n => [n.group, n.id, n.fmt, n.label]),
+    batt: BATTERY_FIELDS.map(f => f[0]),
+  });
+  if (struct !== lastGroupsStruct) {
+    lastGroupsStruct = struct;
+    buildGroups(d);
+  } else {
+    // 增量更新：只替换数值，不重建 DOM
+    d.nodes.forEach(n => {
+      const el = document.querySelector(`[data-node="${n.id}"]`);
+      if (el) el.innerHTML = renderNodeBody(n);
+    });
+    BATTERY_FIELDS.forEach(([key]) => {
+      const el = document.querySelector(`[data-batt="${key}"]`);
+      if (!el) return;
+      const item = d.battery[key] || d.battery[key.toUpperCase()];
+      const has = item && item.ok && item.value !== "";
+      let v = `<span class="empty">不可读</span>`;
+      if (has) {
+        const num = Number(item.value);
+        const shown = Number.isFinite(num) ? batteryConv(key, item.value) : item.value;
+        v = `<span>${esc(shown)}<small>${batteryUnit(key)}</small></span>`;
+      }
+      el.innerHTML = v;
+    });
+  }
+}
+
+function batteryConv(key, raw) {
+  const f = BATTERY_FIELDS.find(x => x[0] === key);
+  if (f) return f[2](raw);
+  return raw;
+}
+
+function batteryUnit(key) {
+  const f = BATTERY_FIELDS.find(x => x[0] === key);
+  return f ? f[3] : "";
+}
+
+function buildGroups(d) {
   const groups = {};
   d.nodes.forEach(n => { (groups[n.group] ||= []).push(n); });
   const cards = Object.entries(groups).map(([name, nodes]) => {
@@ -481,7 +529,7 @@ function renderGroups(d) {
       v = `<span>${esc(shown)}<small>${unit}</small></span>`;
     }
     return `<div class="tile"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
-      `<div class="v">${v}</div></div>`;
+      `<div class="v" data-batt="${key}">${v}</div></div>`;
   }).join("");
   cards.push(`<div class="card"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
     `<div class="tiles batt">${battRows}</div></div>`);
@@ -739,11 +787,7 @@ function render(data) {
   const logsStale = data.meta && data.meta.logs_stale;
   const staleEl = $("logsStaleBadge");
   if (staleEl) staleEl.style.display = logsStale ? "" : "none";
-  const groupsJson = JSON.stringify({ nodes: data.nodes, battery: data.battery });
-  if (groupsJson !== lastGroupsJson) {
-    lastGroupsJson = groupsJson;
-    renderGroups(data);
-  }
+  renderGroups(data);
   const votersJson = JSON.stringify(data.voters || {});
   if (votersJson !== lastVotersJson) {
     lastVotersJson = votersJson;
@@ -761,6 +805,7 @@ function resetRenderSignatures() {
   lastGroupsJson = "";
   lastVotersJson = "";
   lastSessionsJson = "";
+  lastGroupsStruct = "";
 }
 
 let lastMeta = {};

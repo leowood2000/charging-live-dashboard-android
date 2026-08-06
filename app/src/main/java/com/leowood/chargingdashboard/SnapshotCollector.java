@@ -76,7 +76,7 @@ public final class SnapshotCollector {
             rootOk = RootShell.isRootAvailable();
             if (!rootOk) {
                 lastError = "需要 root 权限（KernelSU / Magisk）";
-                snapshotJson = loadingSnapshot(lastError).toString();
+                publishJson(loadingSnapshot(lastError));
                 return;
             }
         }
@@ -84,7 +84,7 @@ public final class SnapshotCollector {
             String batch = readBatch();
             if (batch.isEmpty()) {
                 lastError = "sysfs 读取失败（su 返回空）";
-                snapshotJson = loadingSnapshot(lastError).toString();
+                publishJson(loadingSnapshot(lastError));
                 return;
             }
             JSONObject parsed = build(batch);
@@ -111,7 +111,7 @@ public final class SnapshotCollector {
             publishSnapshot(parsed);
         } catch (Exception e) {
             lastError = "采集异常: " + e.getMessage();
-            snapshotJson = errorSnapshot(lastError).toString();
+            publishJson(errorSnapshot(lastError));
         }
     }
 
@@ -120,13 +120,16 @@ public final class SnapshotCollector {
         try {
             String voteLog = readVoteLogs();
             Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
-            // 临时失败时保留上次成功结果，不清空已有数据
-            if (!voteLog.isEmpty()) {
+            String sessionLog = readSessionLogs();
+            // 读取是否成功：空串表示命令失败/无输出
+            boolean voteReadOk = !voteLog.isEmpty();
+            boolean sessionReadOk = !sessionLog.isEmpty();
+            // 读取成功才解析；解析无匹配（如当前无投票输出）不覆盖旧数据也不算失败
+            if (voteReadOk) {
                 JSONObject voters = parseVotes(voteLog);
                 if (voters.length() > 0) lastVoters = voters;
             }
-            String sessionLog = readSessionLogs();
-            if (!sessionLog.isEmpty()) {
+            if (sessionReadOk) {
                 JSONArray sessions = parseSessions(sessionLog);
                 if (sessions.length() > 0) lastSessions = sessions;
                 String epp = parseEpp(sessionLog);
@@ -134,7 +137,8 @@ public final class SnapshotCollector {
                 Integer icl = parseWlsIcl(sessionLog);
                 if (icl != null) lastWlsIcl = icl;
             }
-            logsStale = voteLog.isEmpty() || sessionLog.isEmpty();
+            // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
+            logsStale = !voteReadOk || !sessionReadOk;
             lastLogsUpdatedAt = System.currentTimeMillis();
             publishLogs();
         } catch (Exception e) {
@@ -151,7 +155,22 @@ public final class SnapshotCollector {
             JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
             if (buck != null) buck.put("icl", lastWlsIcl);
         }
-        snapshotJson = core.toString();
+        // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
+        JSONObject meta = core.optJSONObject("meta");
+        if (meta == null) meta = new JSONObject();
+        meta.put("interval", 3)
+                .put("fast_interval", 3)
+                .put("logs_interval", 20)
+                .put("logs_updated_at", lastLogsUpdatedAt)
+                .put("logs_stale", logsStale)
+                .put("adb", "root-direct");
+        core.put("meta", meta);
+        publishJson(core);
+    }
+
+    /** 唯一写入点：所有状态（loading/offline/live）都经此发布，避免并发覆盖。 */
+    private synchronized void publishJson(JSONObject data) {
+        snapshotJson = data.toString();
     }
 
     private synchronized void publishLogs() throws JSONException {

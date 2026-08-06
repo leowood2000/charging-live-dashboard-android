@@ -75,6 +75,23 @@ public class MainActivity extends Activity {
         super.onResume();
         active = true;
         if (webView != null) webView.onResume();
+        // 回到前台立即采集一次，不等下一个调度周期
+        fastScheduler.execute(() -> {
+            if (!active) return;
+            collector.collectFast();
+            ui.post(() -> {
+                if (webView != null) webView.evaluateJavascript(
+                        "window.__onSnapshot && window.__onSnapshot();", null);
+            });
+        });
+        slowScheduler.execute(() -> {
+            if (!active) return;
+            collector.collectLogs();
+            ui.post(() -> {
+                if (webView != null) webView.evaluateJavascript(
+                        "window.__onSnapshot && window.__onSnapshot();", null);
+            });
+        });
     }
 
     @Override
