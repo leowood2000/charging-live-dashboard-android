@@ -4,6 +4,8 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.util.Log;
+
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -74,7 +76,9 @@ public final class SnapshotCollector {
             JSONObject parsed = build(batch);
             parsed.put("mode", "live");
             parsed.put("connected", true);
-            parsed.put("voters", parseVotes(readVoteLogs()));
+            String voteLog = readVoteLogs();
+            Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
+            parsed.put("voters", parseVotes(voteLog));
             String sessionLog = readSessionLogs();
             parsed.put("sessions", parseSessions(sessionLog));
             String epp = parseEpp(sessionLog);
@@ -373,7 +377,7 @@ public final class SnapshotCollector {
             }
             if (kind == null) continue;
             if (kind.equals("on")) {
-                cur = new JSONObject().put("start", timeOf(line)).put("ended", false)
+                cur = new JSONObject().put("start", shiftLogTime(timeOf(line))).put("ended", false)
                         .put("events", new JSONArray())
                         .put("uuid", JSONObject.NULL).put("tx_adapter", JSONObject.NULL)
                         .put("fc_flag", JSONObject.NULL).put("opens", 0)
@@ -416,9 +420,10 @@ public final class SnapshotCollector {
         return sessions;
     }
 
-    private static JSONObject event(String line, String kind, String label, String detail)
+    private JSONObject event(String line, String kind, String label, String detail)
             throws JSONException {
-        return new JSONObject().put("kind", kind).put("time", timeOf(line))
+        return new JSONObject().put("kind", kind)
+                .put("time", shiftLogTime(timeOf(line)))
                 .put("label", label).put("detail", detail);
     }
 
