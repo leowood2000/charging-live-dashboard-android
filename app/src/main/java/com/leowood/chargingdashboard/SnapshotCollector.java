@@ -346,7 +346,6 @@ public final class SnapshotCollector {
         }
 
         // real_type 状态化：Unknown 在放电/未充电时是正常的，不当作采集失败
-        String battStatus = batteryRaw.optString("STATUS", "");
         for (int i = 0; i < nodeList.length(); i++) {
             JSONObject n = nodeList.getJSONObject(i);
             if (!"real_type".equals(n.optString("id"))) continue;
