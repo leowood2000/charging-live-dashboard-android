@@ -17,6 +17,12 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 投票解析支持 `voting on/off`，并按主题分别缓存最近变动与结果，避免日志交错串线
 - ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
 - 首页同屏展示 MCA 仲裁值 / 实际下发 ICL / 实时 iout，差值超 200mA 时提示可能为旧日志或不同控制阶段
+- 热控电流上限（wired/wireless_chg_curr）按 µA → mA 换算并标注“策略上限”，不再把原始值当 mA 显示
+- 电池 INPUT_CURRENT_LIMIT 按 µA→mA、TIME_TO_FULL_NOW 按秒→分钟换算
+- 移动端电池标准属性恢复两列，长字段（型号/类型）跨两列
+- 会话档案只保留最近 3 个
+- real_type=Unknown 状态化显示（放电=未连接，充电=未识别）
+- 投票未知主题不再默认 mA 单位；effective/投票表行 client 正则与 voting 行统一
 - 实时会话档案（插拔 / 私有认证 / 快充协商 / SmartEndura 介入）
 - 实时曲线（输入功率、电池电流、vout、iout）
 - 虚拟温度与生效场景（来自 mi_thermald thermal.dump）
@@ -50,7 +56,7 @@ gradle assembleDebug
 | MIN | 启用票中取最小 | wireless_buck_input、buck_charge_curr、wireless_*_in、wireless_sw_*_ich、wls_single/multi_chg_cur、div*、single/multi_chg_cur |
 | FIRST_NONZERO | 首个启用且非零的投票 | quick_chg_disable、wls_quick_chg_disable |
 | FIRST_ZERO | 首个启用且为零的投票 | quick_chg_en |
-| UNKNOWN | 未核实，不做推算 | 其余主题 |
+| UNKNOWN | 未核实，不做推算，单位也不猜测 | 其余主题 |
 
 ## 数据来源（设备内，无需 ADB）
 

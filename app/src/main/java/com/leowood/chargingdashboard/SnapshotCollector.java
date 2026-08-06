@@ -24,7 +24,7 @@ public final class SnapshotCollector {
 
     private static final String[][] NODES = {
         {"quick_charge_type", "soc:mca_business_charger/quick_charge_type", "私有快充类型", "私有快充协商", "", "text"},
-        {"real_type", "soc:mca_business_charger/real_type", "真实协议名", "私有快充协商", "", "text"},
+        {"real_type", "soc:mca_business_charger/real_type", "驱动协议类型", "私有快充协商", "", "text"},
         {"power_max", "soc:mca_business_charger/power_max", "协商最大功率", "私有快充协商", "W", "num"},
         {"is_eu_model", "soc:mca_business_charger/is_eu_model", "是否欧版", "私有快充协商", "", "text"},
         {"wls_debug", "soc:mca_strategy_basic_wireless_class/wls_debug", "无线实时参数 vout/vrect/iout", "无线策略实时", "", "wls"},
@@ -32,11 +32,11 @@ public final class SnapshotCollector {
         {"wls_car_adapter", "soc:mca_strategy_basic_wireless_class/wls_car_adapter", "车载适配器标志", "无线策略实时", "", "num"},
         {"audio_phone_sts", "soc:mca_strategy_basic_wireless_class/audio_phone_sts", "音频/通话状态", "无线策略实时", "", "num"},
         {"low_inductance_offset", "soc:mca_strategy_basic_wireless_class/low_inductance_offset", "低感量偏移", "无线策略实时", "", "num"},
-        {"wired_chg_curr", "soc:mca_charger_thermal/wired_chg_curr", "有线热控限流", "有线策略实时", "mA", "num"},
+        {"wired_chg_curr", "soc:mca_charger_thermal/wired_chg_curr", "有线热控电流上限", "有线策略实时", "mA", "ua_to_ma"},
         {"wired_ctrl_limit", "soc:mca_charger_thermal/wired_ctrl_limit", "有线热控等级", "有线策略实时", "", "num"},
         {"ichg_limit", "soc:mca_charge_interface/ichg_limit", "充电电流投票结果", "电流投票与限流", "", "ichg"},
         {"charge_enable", "soc:mca_charge_interface/charge_enable", "充电使能投票", "电流投票与限流", "", "text"},
-        {"wireless_chg_curr", "soc:mca_charger_thermal/wireless_chg_curr", "无线热控限流", "电流投票与限流", "mA", "num"},
+        {"wireless_chg_curr", "soc:mca_charger_thermal/wireless_chg_curr", "无线热控电流上限", "电流投票与限流", "mA", "ua_to_ma"},
         {"ibus_total", "soc:mca_platform_cp/ibus_total", "电荷泵总线电流", "电荷泵与电池", "mA", "num"},
         {"ibus_delta", "soc:mca_platform_cp/ibus_delta", "电荷泵总线电流差", "电荷泵与电池", "mA", "num"},
         {"btb_master_status", "soc:mca_bmd/btb_master_status", "BTB 主/从状态（单电芯双接口）", "电荷泵与电池", "", "text"},
@@ -45,7 +45,7 @@ public final class SnapshotCollector {
 
     private static final String BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent";
     private static final int HISTORY_MAX = 180;
-    private static final int SESSION_MAX = 5;
+    private static final int SESSION_MAX = 3;
     private static final int SESSION_EVENT_MAX = 100;
 
     private final Deque<JSONObject> history = new ArrayDeque<>();
@@ -345,6 +345,23 @@ public final class SnapshotCollector {
             battery.put(k, new JSONObject().put("raw", v).put("value", v).put("ok", !v.isEmpty()));
         }
 
+        // real_type 状态化：Unknown 在放电/未充电时是正常的，不当作采集失败
+        String battStatus = batteryRaw.optString("STATUS", "");
+        for (int i = 0; i < nodeList.length(); i++) {
+            JSONObject n = nodeList.getJSONObject(i);
+            if (!"real_type".equals(n.optString("id"))) continue;
+            String v = n.optString("value", "");
+            if (v.equalsIgnoreCase("unknown") || v.isEmpty()) {
+                if ("Discharging".equalsIgnoreCase(battStatus)
+                        || "Not charging".equalsIgnoreCase(battStatus)) {
+                    n.put("value", "未连接（放电中）").put("ok", true);
+                } else if ("Charging".equalsIgnoreCase(battStatus)) {
+                    n.put("value", "未识别（充电中）").put("ok", true);
+                }
+            }
+            break;
+        }
+
         return new JSONObject()
                 .put("ts", System.currentTimeMillis() / 1000.0)
                 .put("iso", isoNow())
@@ -395,15 +412,41 @@ public final class SnapshotCollector {
     private static final Pattern VOTE_TIME_RE = Pattern.compile("\\[(\\d{2}:\\d{2}:\\d{2}:\\d{3})");
     private static final Pattern VOTE_CHANGED_RE = Pattern.compile(
             "mca_vote:\\d+ (\\w+): ([A-Za-z0-9_.@:/\\-]+),(\\d+) voting (on|off) of val=(-?\\d+)");
-    private static final Pattern VOTE_RESULT_RE = Pattern.compile("mca_vote:\\d+ (\\w+): effective vote is now (-?\\d+) voted by ([A-Za-z0-9_.]+),(\\d+)");
+    private static final Pattern VOTE_RESULT_RE = Pattern.compile("mca_vote:\\d+ (\\w+): effective vote is now (-?\\d+) voted by ([A-Za-z0-9_.@:/\\-]+),(\\d+)");
     private static final Pattern VOTE_HEADER_RE = Pattern.compile("mca_vote:\\d+ (\\w+) VOTER:");
-    private static final Pattern VOTE_ROW_RE = Pattern.compile("(\\d+)\\.([A-Za-z0-9_.]+)\\s+(\\d+)\\s+(-?\\d+)");
+    private static final Pattern VOTE_ROW_RE = Pattern.compile("(\\d+)\\.([A-Za-z0-9_.@:/\\-]+)\\s+(\\d+)\\s+(-?\\d+)");
     private static final java.util.Map<String, String> VOTE_UNITS = new java.util.HashMap<>();
     static {
         VOTE_UNITS.put("term_volt", "mV");
         VOTE_UNITS.put("chg_enable", "");
         VOTE_UNITS.put("quick_chg_disable", "");
         VOTE_UNITS.put("wls_quick_chg_disable", "");
+        // 已从 .ko 核实为电流类投票的主题才显式标注 mA，未知主题默认空单位
+        VOTE_UNITS.put("wireless_buck_input", "mA");
+        VOTE_UNITS.put("buck_charge_curr", "mA");
+        VOTE_UNITS.put("wireless_bpp_in", "mA");
+        VOTE_UNITS.put("wireless_bppqc2_in", "mA");
+        VOTE_UNITS.put("wireless_bppqc3_in", "mA");
+        VOTE_UNITS.put("wireless_epp_in", "mA");
+        VOTE_UNITS.put("wireless_auth_20w", "mA");
+        VOTE_UNITS.put("wireless_auth_30w", "mA");
+        VOTE_UNITS.put("wireless_auth_50w", "mA");
+        VOTE_UNITS.put("wireless_auth_80w", "mA");
+        VOTE_UNITS.put("wireless_auth_voice_box", "mA");
+        VOTE_UNITS.put("wireless_auth_magnet_30w", "mA");
+        VOTE_UNITS.put("wireless_sw_qc_ich", "mA");
+        VOTE_UNITS.put("wireless_sw_thermal_ich", "mA");
+        VOTE_UNITS.put("wls_single_chg_cur", "mA");
+        VOTE_UNITS.put("wls_multi_chg_cur", "mA");
+        VOTE_UNITS.put("div1_single", "mA");
+        VOTE_UNITS.put("div1_multi", "mA");
+        VOTE_UNITS.put("div2_single", "mA");
+        VOTE_UNITS.put("div2_multi", "mA");
+        VOTE_UNITS.put("div4_single", "mA");
+        VOTE_UNITS.put("div4_multi", "mA");
+        VOTE_UNITS.put("thermal_flip", "mA");
+        VOTE_UNITS.put("single_chg_cur", "mA");
+        VOTE_UNITS.put("multi_chg_cur", "mA");
     }
     /** 已从 miro 固件 .ko 反汇编核实的仲裁类型：MIN/MAX/FIRST_NONZERO/FIRST_ZERO/UNKNOWN。 */
     private static final java.util.Map<String, String> VOTE_POLICIES = new java.util.HashMap<>();
@@ -478,7 +521,7 @@ public final class SnapshotCollector {
                 String time = tm.find() ? shiftLogTime(tm.group(1)) : "";
                 current = new JSONObject()
                         .put("topic", topic).put("time", time)
-                        .put("unit", VOTE_UNITS.getOrDefault(topic, "mA"))
+                        .put("unit", VOTE_UNITS.getOrDefault(topic, ""))
                         .put("policy", VOTE_POLICIES.getOrDefault(topic, "UNKNOWN"))
                         .put("changed", changesByTopic.get(topic) != null
                                 ? changesByTopic.get(topic) : JSONObject.NULL)

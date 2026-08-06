@@ -112,6 +112,7 @@
   .kv .v small { color: var(--muted); margin-left: 4px; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
   .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tiles.batt .tile.wide { grid-column: 1 / -1; }
   .tile {
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
     padding: 8px 10px; min-width: 0;
@@ -250,7 +251,7 @@
   @media (max-width: 600px) {
     body { padding: 12px 10px 36px; }
     .grid { grid-template-columns: minmax(0, 1fr); }
-    .tiles.batt { grid-template-columns: 1fr; }
+    .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .card { padding: 12px 10px; }
     table { display: block; overflow-x: auto; }
     canvas { height: 100px; }
@@ -354,14 +355,14 @@ const BATTERY_FIELDS = [
   ["temp", "TEMP", v => (v / 10).toFixed(1), "°C", "0.1°C → °C", "温度"],
   ["status", "STATUS", v => v, "", "", "状态"],
   ["health", "HEALTH", v => v, "", "", "健康"],
-  ["input_current_limit", "INPUT_CURRENT_LIMIT", v => v, "mA", "", "输入限流"],
+  ["input_current_limit", "INPUT_CURRENT_LIMIT", v => (v / 1000).toFixed(0), "mA", "µA → mA", "输入电流上限"],
   ["cycle_count", "CYCLE_COUNT", v => v, "次", "", "循环次数"],
   ["charge_full", "CHARGE_FULL", v => (v / 1000).toFixed(0), "mAh", "µAh → mAh", "满充容量"],
   ["charge_counter", "CHARGE_COUNTER", v => (v / 1000).toFixed(0), "mAh", "µAh → mAh", "累计充电"],
-  ["time_to_full_now", "TIME_TO_FULL_NOW", v => v, "min", "", "充满剩余"],
+  ["time_to_full_now", "TIME_TO_FULL_NOW", v => v > 0 ? Math.ceil(v / 60) : v, "min", "秒 → 分钟", "预计充满剩余"],
   ["voltage_max_design", "VOLTAGE_MAX_DESIGN", v => (v / 1000).toFixed(3), "V", "µV → V", "设计电压上限"],
-  ["technology", "TECHNOLOGY", v => v, "", "", "电池类型"],
-  ["model_name", "MODEL_NAME", v => v, "", "", "电池型号"],
+  ["technology", "TECHNOLOGY", v => v, "", "", "电池类型", true],
+  ["model_name", "MODEL_NAME", v => v, "", "", "电池型号", true],
   ["present", "PRESENT", v => v, "", "", "电池在位"],
   ["capacity_level", "CAPACITY_LEVEL", v => v, "", "", "电量等级"],
 ];
@@ -448,6 +449,11 @@ function renderNodeBody(node) {
       body = `<span class="${on ? "" : "bad"}">${on ? "已建立（EPP 协商成功）" : "未建立（仅 BPP）"}</span>`;
     } else if (node.fmt === "ichg") {
       body = `<span>${esc(node.value)}</span>`;
+    } else if (node.fmt === "ua_to_ma") {
+      const n = Number(node.value);
+      body = Number.isFinite(n)
+        ? `<span title="原始值 ${esc(node.value)} µA（策略上限，非实时测量）">${fmt(n / 1000, 0)}<small>${node.unit || "mA"}</small></span>`
+        : `<span class="bad">${esc(node.value)}</span>`;
     } else if (node.fmt === "num") {
       const n = Number(node.value);
       body = `<span class="${Number.isFinite(n) ? "" : "bad"}">${esc(node.value)}<small>${node.unit}</small></span>`;
@@ -519,7 +525,7 @@ function buildGroups(d) {
       `<div class="tiles">${tiles}${extra}</div></div>`;
   });
 
-  const battRows = BATTERY_FIELDS.map(([key, ukey, conv, unit, hint, label]) => {
+  const battRows = BATTERY_FIELDS.map(([key, ukey, conv, unit, hint, label, wide]) => {
     const item = d.battery[key] || d.battery[ukey.toLowerCase()];
     const has = item && item.ok && item.value !== "";
     let v = `<span class="empty">不可读</span>`;
@@ -528,7 +534,7 @@ function buildGroups(d) {
       const shown = Number.isFinite(num) ? conv(num) : item.value;
       v = `<span>${esc(shown)}<small>${unit}</small></span>`;
     }
-    return `<div class="tile"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
+    return `<div class="tile${wide ? " wide" : ""}"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
       `<div class="v" data-batt="${key}">${v}</div></div>`;
   }).join("");
   cards.push(`<div class="card"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
