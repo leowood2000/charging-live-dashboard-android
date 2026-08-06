@@ -5,6 +5,14 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 直接在手机上通过 root（KernelSU / Magisk）读取 sysfs、MCA 内核日志与 mi_thermald 状态，
 **不需要 ADB、不需要电脑**。页面为 WebView 内嵌仪表盘，首页即展示实时 KPI 与**投票总仲裁结果**。
 
+## 截图
+
+| 首页实时 KPI | 无线/有线策略实时 | 投票与限流 | 总仲裁结果 |
+|---|---|---|---|
+| <img src="screenshots/01-top-kpi.png" width="230"> | <img src="screenshots/02-strategy-realtime.png" width="230"> | <img src="screenshots/03-vote-cp.png" width="230"> | <img src="screenshots/04-arbitration.png" width="230"> |
+
+截图为 K80 Pro（miro）实机画面：首页 KPI、私有快充协商、无线/有线策略实时、MCA 投票与总仲裁结果（仲裁值 / 实际下发 ICL / 实时 iout 同屏对照）。
+
 ## 功能
 
 - 实时 KPI：无线输入功率、电池充电功率/电流/电压、SOC、电池温度
