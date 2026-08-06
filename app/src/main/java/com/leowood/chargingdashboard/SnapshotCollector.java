@@ -244,7 +244,7 @@ public final class SnapshotCollector {
         o.put(key, Double.isFinite(v) ? v : JSONObject.NULL);
     }
 
-    private static JSONObject parseUevent(String text) {
+    private static JSONObject parseUevent(String text) throws JSONException {
         JSONObject o = new JSONObject();
         for (String line : text.split("\n")) {
             int eq = line.indexOf('=');
@@ -256,7 +256,7 @@ public final class SnapshotCollector {
         return o;
     }
 
-    private static JSONObject parseWlsDebug(String text) {
+    private static JSONObject parseWlsDebug(String text) throws JSONException {
         JSONObject o = new JSONObject();
         Matcher m = Pattern.compile("([A-Za-z_]+)\\s*=\\s*(-?\\d+(?:\\.\\d+)?)").matcher(text);
         while (m.find()) o.put(m.group(1), Double.parseDouble(m.group(2)));
