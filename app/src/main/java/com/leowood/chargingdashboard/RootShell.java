@@ -8,14 +8,17 @@ import java.util.concurrent.TimeUnit;
 /** 通过 su 执行 root 命令（KernelSU / Magisk）。 */
 public final class RootShell {
     private static final String[] SU_CANDIDATES = {
-        "/data/adb/ksu/bin/ksud",   // KernelSU (ksud 自身可通过其 root shell)
-        "/data/adb/ksu/bin/su",
-        "/data/adb/magisk/busybox",
+        // 优先 PATH 中的 su（KernelSU/Magisk 都挂到 /system/bin/su）
+        "su",
         "/system/bin/su",
         "/system/xbin/su",
-        "su",
+        "/sbin/su",
+        "/vendor/bin/su",
+        "/data/adb/ksu/bin/su",
+        "/data/adb/magisk/busybox",
     };
     private static volatile String suPath = null;
+    private static volatile long suCheckedAt = 0;
 
     private RootShell() {}
 
@@ -47,10 +50,11 @@ public final class RootShell {
 
     private static String resolveSu() {
         if (suPath != null) return suPath;
+        // 短探测：每个候选最多 2 秒，避免启动时长时间黑屏
         for (String cand : SU_CANDIDATES) {
             try {
                 Process p = new ProcessBuilder(cand, "-c", "id").redirectErrorStream(true).start();
-                if (p.waitFor(5, TimeUnit.SECONDS)) {
+                if (p.waitFor(2, TimeUnit.SECONDS)) {
                     try (BufferedReader r = new BufferedReader(
                             new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                         StringBuilder sb = new StringBuilder();
@@ -61,10 +65,13 @@ public final class RootShell {
                             return cand;
                         }
                     }
+                } else {
+                    p.destroyForcibly();
                 }
             } catch (Exception ignored) {
             }
         }
+        suCheckedAt = System.currentTimeMillis();
         return null;
     }
 }
