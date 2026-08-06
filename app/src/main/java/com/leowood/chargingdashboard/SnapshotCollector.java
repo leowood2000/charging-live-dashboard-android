@@ -55,6 +55,8 @@ public final class SnapshotCollector {
     private volatile JSONObject lastVoters = new JSONObject();
     private volatile JSONArray lastSessions = new JSONArray();
     private volatile String lastEpp = null;
+    /** 驱动实测无线输入限流（wireless loop icl），比投票最小值推算更可信。 */
+    private volatile Integer lastWlsIcl = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private String lastError = "";
@@ -129,6 +131,8 @@ public final class SnapshotCollector {
                 if (sessions.length() > 0) lastSessions = sessions;
                 String epp = parseEpp(sessionLog);
                 if (epp != null) lastEpp = epp;
+                Integer icl = parseWlsIcl(sessionLog);
+                if (icl != null) lastWlsIcl = icl;
             }
             logsStale = voteLog.isEmpty() || sessionLog.isEmpty();
             lastLogsUpdatedAt = System.currentTimeMillis();
@@ -143,6 +147,10 @@ public final class SnapshotCollector {
         core.put("voters", lastVoters);
         core.put("sessions", lastSessions);
         if (lastEpp != null) appendEppNode(core, lastEpp);
+        if (lastWlsIcl != null) {
+            JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
+            if (buck != null) buck.put("icl", lastWlsIcl);
+        }
         snapshotJson = core.toString();
     }
 
@@ -220,7 +228,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
@@ -532,6 +540,14 @@ public final class SnapshotCollector {
         String last = null;
         Matcher m = Pattern.compile("\\bepp:(\\d)").matcher(text);
         while (m.find()) last = m.group(1);
+        return last;
+    }
+
+    /** 取最新 wireless loop icl（驱动实际下发的无线输入限流）。 */
+    private Integer parseWlsIcl(String text) {
+        Integer last = null;
+        Matcher m = Pattern.compile("wireless loop: icl:(\\d+)").matcher(text);
+        while (m.find()) last = Integer.parseInt(m.group(1));
         return last;
     }
 
