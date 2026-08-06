@@ -15,7 +15,8 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - MCA 仲裁展示修正：驱动 `effective vote is now` 优先，`wireless loop: icl` 单独显示为“实际下发 ICL”，不再混为一谈
 - 每个 votable 标注已核实的仲裁类型（MIN/MAX/NONZERO/ZERO），未知类型不做盲目推算
 - 投票解析支持 `voting on/off`，并按主题分别缓存最近变动与结果，避免日志交错串线
-- ICL 带日志时间与采集时刻，旧会话残留一目了然
+- ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
+- 首页同屏展示 MCA 仲裁值 / 实际下发 ICL / 实时 iout，差值超 200mA 时提示可能为旧日志或不同控制阶段
 - 实时会话档案（插拔 / 私有认证 / 快充协商 / SmartEndura 介入）
 - 实时曲线（输入功率、电池电流、vout、iout）
 - 虚拟温度与生效场景（来自 mi_thermald thermal.dump）
@@ -46,9 +47,9 @@ gradle assembleDebug
 
 | 类型 | 含义 | 已核实的 votable 示例 |
 |---|---|---|
-| MIN | 启用票中取最小 | wireless_buck_input、wireless_*_in、wireless_sw_*_ich、wls_single/multi_chg_cur、div*、single/multi_chg_cur |
-| NONZERO | 首个启用且非零的投票 | quick_chg_disable、wls_quick_chg_disable |
-| ZERO | 首个启用且为零的投票 | quick_chg_en |
+| MIN | 启用票中取最小 | wireless_buck_input、buck_charge_curr、wireless_*_in、wireless_sw_*_ich、wls_single/multi_chg_cur、div*、single/multi_chg_cur |
+| FIRST_NONZERO | 首个启用且非零的投票 | quick_chg_disable、wls_quick_chg_disable |
+| FIRST_ZERO | 首个启用且为零的投票 | quick_chg_en |
 | UNKNOWN | 未核实，不做推算 | 其余主题 |
 
 ## 数据来源（设备内，无需 ADB）

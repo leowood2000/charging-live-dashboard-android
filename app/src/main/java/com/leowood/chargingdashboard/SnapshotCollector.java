@@ -136,11 +136,18 @@ public final class SnapshotCollector {
                 if (sessions.length() > 0) lastSessions = sessions;
                 String epp = parseEpp(sessionLog);
                 if (epp != null) lastEpp = epp;
-                WlsIcl icl = parseWlsIcl(sessionLog);
-                if (icl != null) {
-                    lastWlsIcl = icl.value;
-                    lastWlsIclAt = icl.at;
-                    lastWlsIclLogTime = icl.logTime;
+                if (isLastWirelessPowerOff(sessionLog)) {
+                    // 无线已断开：清掉旧 ICL，避免上一个会话的值继续覆盖显示
+                    lastWlsIcl = null;
+                    lastWlsIclAt = null;
+                    lastWlsIclLogTime = null;
+                } else {
+                    WlsIcl icl = parseWlsIcl(sessionLog);
+                    if (icl != null) {
+                        lastWlsIcl = icl.value;
+                        lastWlsIclAt = icl.at;
+                        lastWlsIclLogTime = icl.logTime;
+                    }
                 }
             }
             // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
@@ -398,7 +405,7 @@ public final class SnapshotCollector {
         VOTE_UNITS.put("quick_chg_disable", "");
         VOTE_UNITS.put("wls_quick_chg_disable", "");
     }
-    /** 已从 miro 固件 .ko 反汇编核实的仲裁类型：MIN/MAX/NONZERO/ZERO/UNKNOWN。 */
+    /** 已从 miro 固件 .ko 反汇编核实的仲裁类型：MIN/MAX/FIRST_NONZERO/FIRST_ZERO/UNKNOWN。 */
     private static final java.util.Map<String, String> VOTE_POLICIES = new java.util.HashMap<>();
     static {
         // mca_basic_wireless.ko：mca_create_votable(..., 0, ...) 全部为 MIN
@@ -415,13 +422,15 @@ public final class SnapshotCollector {
         VOTE_POLICIES.put("wireless_auth_magnet_30w", "MIN");
         VOTE_POLICIES.put("wireless_sw_qc_ich", "MIN");
         VOTE_POLICIES.put("wireless_sw_thermal_ich", "MIN");
+        // 项目配置（用户确认）：有线 buck 充电电流按 MIN 推算
+        VOTE_POLICIES.put("buck_charge_curr", "MIN");
         // mca_quick_wireless.ko：wls_single/multi_chg_cur 为 MIN，disable 为 type2（首个非零）
         VOTE_POLICIES.put("wls_single_chg_cur", "MIN");
         VOTE_POLICIES.put("wls_multi_chg_cur", "MIN");
-        VOTE_POLICIES.put("wls_quick_chg_disable", "NONZERO");
+        VOTE_POLICIES.put("wls_quick_chg_disable", "FIRST_NONZERO");
         // mca_strategy_quickchg（反编译 C）：电流类 type0，disable type2，en type3（首个为零）
-        VOTE_POLICIES.put("quick_chg_disable", "NONZERO");
-        VOTE_POLICIES.put("quick_chg_en", "ZERO");
+        VOTE_POLICIES.put("quick_chg_disable", "FIRST_NONZERO");
+        VOTE_POLICIES.put("quick_chg_en", "FIRST_ZERO");
         VOTE_POLICIES.put("div1_single", "MIN");
         VOTE_POLICIES.put("div1_multi", "MIN");
         VOTE_POLICIES.put("div2_single", "MIN");
@@ -628,6 +637,12 @@ public final class SnapshotCollector {
 
     private static final Pattern WLS_ICL_RE =
             Pattern.compile("wireless loop: icl:(\\d+)");
+
+    /** 最后一次无线电源事件是否为断开（power_good_off 晚于 power_good_on）。 */
+    private boolean isLastWirelessPowerOff(String text) {
+        return text.lastIndexOf("wireless power_good_off")
+                > text.lastIndexOf("wireless power_good_on");
+    }
 
     /** 取最新 wireless loop icl（驱动实际下发的无线输入限流），附带时间和采集时刻。 */
     private WlsIcl parseWlsIcl(String text) {

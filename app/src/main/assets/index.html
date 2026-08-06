@@ -572,6 +572,8 @@ function renderVoters(d) {
   };
   const buck = topics.wireless_buck_input;
   const mcaEff = effectiveOf(buck);
+  const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
+    ? d.derived.iout : null;
   addSummary("无线输入限流", mcaEff, v => `${v}mA`);
   if (buck && buck.icl !== undefined && buck.icl !== null) {
     const ago = buck.icl_at ? Math.max(0, Math.round((Date.now() - buck.icl_at) / 1000)) : null;
@@ -581,6 +583,15 @@ function renderVoters(d) {
     }
     summary.push(`<span class="chip" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">` +
       `实际下发 ICL<b>${buck.icl}</b><small>mA${ago !== null ? " · " + ago + "s前" : ""}${diff}</small></span>`);
+  }
+  if (ioutNow !== null) {
+    summary.push(`<span class="chip" title="wls_debug 实时输出电流">实时 iout<b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`);
+  }
+  if (buck && buck.icl !== undefined && buck.icl !== null && ioutNow !== null &&
+      Math.abs(buck.icl - ioutNow) > 200) {
+    summary.push(`<span class="chip" style="color:var(--amber);border-color:rgba(251,191,36,.5)" ` +
+      `title="ICL 与实时 iout 相差超过 200mA，可能为旧日志或处于不同控制阶段">` +
+      `ICL 与 iout 不一致<b>Δ${Math.round(Math.abs(buck.icl - ioutNow))}</b><small>mA</small></span>`);
   }
   addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
@@ -642,8 +653,12 @@ function renderVoters(d) {
       iclText = `<span class="vote-result" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">实际下发 ICL <b>${b.icl}</b>mA` +
         `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}</small></span>`;
     }
+    let ioutText = "";
+    if (t === "wireless_buck_input" && ioutNow !== null) {
+      ioutText = `<span class="vote-result" title="wls_debug 实时输出电流">实时 iout <b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`;
+    }
     return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +
-      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}</div>` +
+      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
   el.innerHTML = summaryCard + cards;
