@@ -59,6 +59,10 @@ public final class SnapshotCollector {
     private volatile Integer lastWlsIcl = null;
     private volatile Long lastWlsIclAt = null;
     private volatile String lastWlsIclLogTime = null;
+    /** quick wireless 最终电池电流目标 cur_max:[Final]，CP 快充路径下真正约束电流的值。 */
+    private volatile Integer lastQuickCurMax = null;
+    /** wireless loop 行里的 buck_fcc（电池侧 FCC 上限），cur_max 缺失时的回退。 */
+    private volatile Integer lastBuckFcc = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private String lastError = "";
@@ -141,6 +145,8 @@ public final class SnapshotCollector {
                     lastWlsIcl = null;
                     lastWlsIclAt = null;
                     lastWlsIclLogTime = null;
+                    lastQuickCurMax = null;
+                    lastBuckFcc = null;
                 } else {
                     WlsIcl icl = parseWlsIcl(sessionLog);
                     if (icl != null) {
@@ -148,6 +154,10 @@ public final class SnapshotCollector {
                         lastWlsIclAt = icl.at;
                         lastWlsIclLogTime = icl.logTime;
                     }
+                    Integer qcm = parseQuickCurMax(sessionLog);
+                    if (qcm != null) lastQuickCurMax = qcm;
+                    Integer bf = parseBuckFcc(sessionLog);
+                    if (bf != null) lastBuckFcc = bf;
                 }
             }
             // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
@@ -169,6 +179,15 @@ public final class SnapshotCollector {
             if (buck != null) buck.put("icl", lastWlsIcl)
                     .put("icl_time", lastWlsIclLogTime == null ? "" : lastWlsIclLogTime)
                     .put("icl_at", lastWlsIclAt == null ? 0L : lastWlsIclAt.longValue());
+        }
+        JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
+        if (buck != null) {
+            Integer actual = lastQuickCurMax != null ? lastQuickCurMax : lastBuckFcc;
+            if (actual != null) {
+                buck.put("actual_limit", actual)
+                        .put("actual_limit_source",
+                                lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
+            }
         }
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
         JSONObject meta = core.optJSONObject("meta");
@@ -262,7 +281,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
@@ -679,6 +698,10 @@ public final class SnapshotCollector {
 
     private static final Pattern WLS_ICL_RE =
             Pattern.compile("wireless loop: icl:(\\d+)");
+    private static final Pattern QUICK_CUR_MAX_RE =
+            Pattern.compile("cur_max:\\[Final\\]: (\\d+)");
+    private static final Pattern BUCK_FCC_RE =
+            Pattern.compile("wireless loop: icl:\\d+, buck_fcc:(\\d+)");
 
     /** 最后一次无线电源事件是否为断开（power_good_off 晚于 power_good_on）。 */
     private boolean isLastWirelessPowerOff(String text) {
@@ -696,6 +719,22 @@ public final class SnapshotCollector {
             String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
             last = new WlsIcl(Integer.parseInt(m.group(1)), System.currentTimeMillis(), logTime);
         }
+        return last;
+    }
+
+    /** 取最新 quick wireless 最终电池电流目标 cur_max:[Final]（CP 快充路径的实际约束值）。 */
+    private Integer parseQuickCurMax(String text) {
+        Integer last = null;
+        Matcher m = QUICK_CUR_MAX_RE.matcher(text);
+        while (m.find()) last = Integer.parseInt(m.group(1));
+        return last;
+    }
+
+    /** 取最新 wireless loop 行里的 buck_fcc（电池侧 FCC 上限），cur_max 缺失时回退用。 */
+    private Integer parseBuckFcc(String text) {
+        Integer last = null;
+        Matcher m = BUCK_FCC_RE.matcher(text);
+        while (m.find()) last = Integer.parseInt(m.group(1));
         return last;
     }
 

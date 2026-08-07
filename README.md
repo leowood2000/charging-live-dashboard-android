@@ -24,7 +24,8 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 每个 votable 标注已核实的仲裁类型（MIN/MAX/NONZERO/ZERO），未知类型不做盲目推算
 - 投票解析支持 `voting on/off`，并按主题分别缓存最近变动与结果，避免日志交错串线
 - ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
-- 首页同屏展示 MCA 仲裁值 / 实际下发 ICL / 实时 iout，并按物理功率比（icl × vrect / vbat）判定“限流未生效”，仲裁 chip 直接标注
+- 总仲裁只显示实际结果：无线输入限流在仲裁值未生效时，自动改用真正约束电流的限流（quick_wireless cur_max / buck_fcc）；保留生效场景 / 虚拟温度 / 电池温度
+- 实际下发 ICL / 实时 iout / 限流未生效细节移到 wireless_buck_input 详情卡，并按物理功率比（icl × vrect / vbat）判定
 - 热控电流上限（wired/wireless_chg_curr）按 µA → mA 换算并标注“策略上限”，不再把原始值当 mA 显示
 - 电池 INPUT_CURRENT_LIMIT 按 µA→mA、TIME_TO_FULL_NOW 按秒→分钟换算
 - 移动端电池标准属性恢复两列，长字段（型号/类型）跨两列
