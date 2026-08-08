@@ -77,6 +77,7 @@ public final class SnapshotCollector {
     private volatile boolean lastWiredBuck = false;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
+    private volatile boolean powerPathLogsStale = false;
     private String lastError = "";
     private boolean rootOk = false;
     private final int utcOffsetMinutes = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
@@ -139,9 +140,13 @@ public final class SnapshotCollector {
             String voteLog = readVoteLogs();
             Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
             String sessionLog = readSessionLogs();
-            // 读取是否成功：空串表示命令失败/无输出
+            String ppLog = readPowerPathLogs();
+            // 用完成标记区分“命令成功但无匹配”和“命令失败”
+            boolean sessionReadOk = sessionLog.contains("__SESS_OK__");
+            sessionLog = sessionLog.replace("__SESS_OK__", "").trim();
+            boolean ppReadOk = ppLog.contains("__PP_OK__");
+            ppLog = ppLog.replace("__PP_OK__", "").trim();
             boolean voteReadOk = !voteLog.isEmpty();
-            boolean sessionReadOk = !sessionLog.isEmpty();
             // 读取成功才解析；解析无匹配（如当前无投票输出）不覆盖旧数据也不算失败
             if (voteReadOk) {
                 JSONObject voters = parseVotes(voteLog);
@@ -169,51 +174,55 @@ public final class SnapshotCollector {
                         lastWlsIclAt = icl.at;
                         lastWlsIclLogTime = icl.logTime;
                     }
-                    Integer qcm = parseQuickCurMax(sessionLog);
-                    if (qcm != null) lastQuickCurMax = qcm;
                     Integer bf = parseBuckFcc(sessionLog);
                     if (bf != null) lastBuckFcc = bf;
-                    JSONObject cpState = parseSessionCpState(sessionLog);
-                    // 无线 track：power_good 边界
-                    if (cpState.optBoolean("w_boundary", false)) {
-                        lastCpMode = cpState.isNull("w_mode") ? null : cpState.getInt("w_mode");
-                        lastCpWorkMode = cpState.isNull("w_work") ? null : cpState.getInt("w_work");
-                        lastCurDecision = cpState.isNull("w_decision")
-                                ? null : cpState.getJSONObject("w_decision");
-                    } else {
-                        if (!cpState.isNull("w_mode")) lastCpMode = cpState.getInt("w_mode");
-                        if (!cpState.isNull("w_work")) {
-                            lastCpWorkMode = cpState.getInt("w_work");
-                        }
-                        if (!cpState.isNull("w_decision")) {
-                            lastCurDecision = cpState.getJSONObject("w_decision");
-                        }
+                }
+            }
+            // 功率路径通道：高频信号，手机端已 tail -n 200 封顶
+            if (ppReadOk) {
+                Integer qcm = parseQuickCurMax(ppLog);
+                if (qcm != null) lastQuickCurMax = qcm;
+                JSONObject cpState = parseSessionCpState(ppLog);
+                // 无线 track：power_good 边界
+                if (cpState.optBoolean("w_boundary", false)) {
+                    lastCpMode = cpState.isNull("w_mode") ? null : cpState.getInt("w_mode");
+                    lastCpWorkMode = cpState.isNull("w_work") ? null : cpState.getInt("w_work");
+                    lastCurDecision = cpState.isNull("w_decision")
+                            ? null : cpState.getJSONObject("w_decision");
+                } else {
+                    if (!cpState.isNull("w_mode")) lastCpMode = cpState.getInt("w_mode");
+                    if (!cpState.isNull("w_work")) {
+                        lastCpWorkMode = cpState.getInt("w_work");
                     }
-                    // 有线 track：usb online / real_type changed 边界
-                    if (cpState.optBoolean("d_boundary", false)) {
-                        lastWiredState = cpState.optString("d_state", "unknown");
-                        lastWiredCpRatio = cpState.isNull("d_ratio") ? null : cpState.getInt("d_ratio");
-                        lastWiredCurCp = cpState.optBoolean("d_cur_cp", false);
-                        lastWiredBuck = cpState.optBoolean("d_buck", false);
-                    } else {
-                        String ds = cpState.optString("d_state", "unknown");
-                        if (!"unknown".equals(ds)) {
-                            lastWiredState = ds;
-                        }
-                        if (!cpState.isNull("d_ratio")) {
-                            lastWiredCpRatio = cpState.getInt("d_ratio");
-                        }
-                        if (cpState.optBoolean("d_cur_cp", false)) {
-                            lastWiredCurCp = true;
-                        }
-                        if (cpState.optBoolean("d_buck", false)) {
-                            lastWiredBuck = true;
-                        }
+                    if (!cpState.isNull("w_decision")) {
+                        lastCurDecision = cpState.getJSONObject("w_decision");
+                    }
+                }
+                // 有线 track：usb online / real_type changed 边界
+                if (cpState.optBoolean("d_boundary", false)) {
+                    lastWiredState = cpState.optString("d_state", "unknown");
+                    lastWiredCpRatio = cpState.isNull("d_ratio") ? null : cpState.getInt("d_ratio");
+                    lastWiredCurCp = cpState.optBoolean("d_cur_cp", false);
+                    lastWiredBuck = cpState.optBoolean("d_buck", false);
+                } else {
+                    String ds = cpState.optString("d_state", "unknown");
+                    if (!"unknown".equals(ds)) {
+                        lastWiredState = ds;
+                    }
+                    if (!cpState.isNull("d_ratio")) {
+                        lastWiredCpRatio = cpState.getInt("d_ratio");
+                    }
+                    if (cpState.optBoolean("d_cur_cp", false)) {
+                        lastWiredCurCp = true;
+                    }
+                    if (cpState.optBoolean("d_buck", false)) {
+                        lastWiredBuck = true;
                     }
                 }
             }
-            // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
+            // 三条通道独立 stale：功率路径失败不拖累 session/vote 主链路
             logsStale = !voteReadOk || !sessionReadOk;
+            powerPathLogsStale = !ppReadOk;
             lastLogsUpdatedAt = System.currentTimeMillis();
             publishLogs();
         } catch (Exception e) {
@@ -273,6 +282,7 @@ public final class SnapshotCollector {
                 .put("logs_interval", 10)
                 .put("logs_updated_at", lastLogsUpdatedAt)
                 .put("logs_stale", logsStale)
+                .put("power_path_logs_stale", powerPathLogsStale)
                 .put("adb", "root-direct");
         core.put("meta", meta);
         publishJson(core);
@@ -357,7 +367,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat|sc8581_set_operation_mode|mca_wireless_quick_charge_select_cur_work_mode|usb online|real_type changed|mca_quick_charge_update_work_mode_para|strategy_quickchg_map_ibus_to_fsw|mca_quick_charge_select_max_ibat|mca_quick_charge_select_cur_work_mode|mca_strategy_buckchg|strategy_buckchg";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
@@ -368,7 +378,24 @@ public final class SnapshotCollector {
                     .append(" | grep -a -E '").append(pattern)
                     .append("' | grep -v sysfs_show; ");
         }
+        script.append("echo __SESS_OK__");
         return RootShell.exec(script.toString(), 25);
+    }
+
+    /** 功率路径高频信号专用通道：只读最新文件 1MB，手机端 grep + tail 200 后返回。 */
+    private String readPowerPathLogs() {
+        String fname = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 1", 10).trim();
+        if (!fname.matches("[A-Za-z0-9_.\\-]+")) return "";
+        String pattern = "power_good|usb online|real_type changed|"
+                + "sc8581_set_operation_mode|"
+                + "mca_quick_charge_update_work_mode_para|"
+                + "strategy_quickchg_map_ibus_to_fsw|"
+                + "cur_work_cp|"
+                + "strategy_buckchg_charge_limit|"
+                + "mca_wireless_quick_charge_select_cur_work_mode|"
+                + "mca_wireless_quick_charge_select_max_ibat";
+        return RootShell.exec("tail -c 1048576 " + MCA_LOG_DIR + "/" + fname
+                + " | grep -a -E '" + pattern + "' | tail -n 200; echo __PP_OK__", 15);
     }
 
     private JSONObject build(String batch) throws JSONException {
@@ -468,6 +495,7 @@ public final class SnapshotCollector {
                         .put("logs_interval", 10)
                         .put("logs_updated_at", lastLogsUpdatedAt)
                         .put("logs_stale", logsStale)
+                        .put("power_path_logs_stale", powerPathLogsStale)
                         .put("adb", "root-direct"));
     }
 
