@@ -876,21 +876,31 @@ function renderVoters(d) {
         const wst = wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
           && wcp.stage_cur_max.cur_max !== null ? wcp.stage_cur_max : null;
         const curAge = o => (o && o.at) ? Math.max(0, Math.round((Date.now() - o.at) / 1000)) : null;
-        if (wd) {
-          const age = curAge(wd);
-          summary.push(`<span class="chip" title="mca_quick_charge_select_max_ibat 最终行 cur_max（算法目标，非实测电流）${wd.log_time ? " · 日志 " + esc(wd.log_time) : ""}">` +
-            `电池充电目标<b>${fmt(wd.cur_max, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}</small></span>`);
-        } else if (wst) {
-          const age = curAge(wst);
-          summary.push(`<span class="chip" title="仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
-            `阶段充电目标<b>${fmt(wst.cur_max, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值</small></span>`);
-        } else {
-          summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">电池充电目标<b>--</b><small>待刷新</small></span>`);
-        }
         // CP 路径上限：div4_single / div4_multi 只是约束项，不冒充最终电流
         const limSingle = effectiveOf(topics.div4_single);
         const limMulti = effectiveOf(topics.div4_multi);
         const cpLim = limSingle || limMulti;
+        // 实际目标 = min(cur_max, CP 路径上限)，避免把算法原始 cur_max 当成可达到目标
+        const effTarget = raw => (cpLim && cpLim.value < raw)
+          ? { value: cpLim.value, capped: true }
+          : { value: raw, capped: false };
+        if (wd) {
+          const age = curAge(wd);
+          const t = effTarget(wd.cur_max);
+          summary.push(`<span class="chip" title="${t.capped
+            ? `quick_charge cur_max ${wd.cur_max}mA 被 CP 路径上限 ${cpLim.value}mA 约束，实际目标取较小值`
+            : "mca_quick_charge_select_max_ibat 最终行 cur_max（算法目标，非实测电流）"}${wd.log_time ? " · 日志 " + esc(wd.log_time) : ""}">` +
+            `电池充电目标<b>${fmt(t.value, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}${t.capped ? " · 受路径上限约束" : ""}</small></span>`);
+        } else if (wst) {
+          const age = curAge(wst);
+          const t = effTarget(wst.cur_max);
+          summary.push(`<span class="chip" title="${t.capped
+            ? `cur_stage cur_max ${wst.cur_max}mA 被 CP 路径上限 ${cpLim.value}mA 约束，实际目标取较小值`
+            : "仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值"}${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
+            `阶段充电目标<b>${fmt(t.value, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值${t.capped ? " · 受路径上限约束" : ""}</small></span>`);
+        } else {
+          summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">电池充电目标<b>--</b><small>待刷新</small></span>`);
+        }
         if (cpLim) {
           const limTopic = limSingle ? "div4_single" : "div4_multi";
           summary.push(`<span class="chip" title="${limTopic} 投票上限（CP 路径约束，非最终充电目标）">` +
