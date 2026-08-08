@@ -60,6 +60,7 @@ public final class SnapshotCollector {
     private volatile Integer lastWlsIcl = null;
     private volatile Long lastWlsIclAt = null;
     private volatile String lastWlsIclLogTime = null;
+    private volatile Integer lastWlsChgEn = null;
     /** quick wireless 最终电池电流目标 cur_max:[Final]，CP 快充路径下真正约束电流的值。 */
     private volatile Integer lastQuickCurMax = null;
     /** wireless loop 行里的 buck_fcc（电池侧 FCC 上限），cur_max 缺失时的回退。 */
@@ -183,6 +184,7 @@ public final class SnapshotCollector {
                     lastWlsIclAt = null;
                     lastWlsIclLogTime = null;
                     lastWlsIclKey = null;
+                    lastWlsChgEn = null;
                     lastQuickCurMax = null;
                     lastBuckFcc = null;
                     lastCpMode = null;
@@ -201,12 +203,13 @@ public final class SnapshotCollector {
                             ? null : wm.getInt("rx_iout_limit");
                     WlsIcl icl = parseWlsIcl(wtail);
                     if (icl != null) {
-                        String key = icl.value + "|" + icl.logTime;
+                        String key = icl.value + "|" + icl.chgEn + "|" + icl.logTime;
                         if (!key.equals(lastWlsIclKey)) {
                             lastWlsIclKey = key;
                             lastWlsIcl = icl.value;
                             lastWlsIclAt = icl.at;
                             lastWlsIclLogTime = icl.logTime;
+                            lastWlsChgEn = icl.chgEn;
                         }
                     }
                     Integer bf = parseBuckFcc(wtail);
@@ -338,6 +341,7 @@ public final class SnapshotCollector {
             if (buck != null) buck.put("icl", lastWlsIcl)
                     .put("icl_time", lastWlsIclLogTime == null ? "" : lastWlsIclLogTime)
                     .put("icl_at", lastWlsIclAt == null ? 0L : lastWlsIclAt.longValue());
+            if (buck != null && lastWlsChgEn != null) buck.put("chg_en", lastWlsChgEn);
         }
         JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
         if (buck != null) {
@@ -1048,21 +1052,23 @@ public final class SnapshotCollector {
         return last;
     }
 
-    /** wireless loop icl 快照：值 + 日志本地时间 + 解析时刻（用于判断新旧）。 */
+    /** wireless loop icl 快照：值 + chg_en + 日志本地时间 + 解析时刻（用于判断新旧）。 */
     private static final class WlsIcl {
         final int value;
+        final int chgEn;
         final long at;
         final String logTime;
 
-        WlsIcl(int value, long at, String logTime) {
+        WlsIcl(int value, int chgEn, long at, String logTime) {
             this.value = value;
+            this.chgEn = chgEn;
             this.at = at;
             this.logTime = logTime;
         }
     }
 
     private static final Pattern WLS_ICL_RE =
-            Pattern.compile("wireless loop: icl:(\\d+)");
+            Pattern.compile("wireless loop: icl:(\\d+), buck_fcc:\\d+, chg_en:(\\d+)");
     private static final Pattern QUICK_CUR_MAX_RE =
             Pattern.compile("cur_max:\\[Final\\]: (\\d+)");
     private static final Pattern BUCK_FCC_RE =
@@ -1074,7 +1080,7 @@ public final class SnapshotCollector {
                 > text.lastIndexOf("wireless power_good_on");
     }
 
-    /** 取最新 wireless loop icl（驱动实际下发的无线输入限流），附带时间和采集时刻。 */
+    /** 取最新 wireless loop icl + chg_en（驱动实际下发状态），附带时间和采集时刻。 */
     private WlsIcl parseWlsIcl(String text) {
         WlsIcl last = null;
         for (String line : text.split("\n")) {
@@ -1082,7 +1088,9 @@ public final class SnapshotCollector {
             if (!m.find()) continue;
             Matcher tm = VOTE_TIME_RE.matcher(line);
             String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
-            last = new WlsIcl(Integer.parseInt(m.group(1)), System.currentTimeMillis(), logTime);
+            last = new WlsIcl(Integer.parseInt(m.group(1)),
+                    Integer.parseInt(m.group(2)),
+                    System.currentTimeMillis(), logTime);
         }
         return last;
     }
