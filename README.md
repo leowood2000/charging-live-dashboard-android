@@ -21,7 +21,7 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 无线/有线热控实时数据（无线热控限流、有线热控等级、热控档位投票）
 - 电流投票实时表 + **总仲裁结果**（生效客户、最终值、推算值）
 - MCA 仲裁展示修正：驱动 `effective vote is now` 优先，`wireless loop: icl` 单独显示为“实际下发 ICL”，不再混为一谈
-- 每个 votable 标注已核实的仲裁类型（MIN/MAX/NONZERO/ZERO），未知类型不做盲目推算
+- 每个 votable 标注仲裁类型（大部分来自 .ko 反汇编核实；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，仅详情卡“参考推算”），未知类型不做盲目推算
 - 投票解析支持 `voting on/off`，并按主题分别缓存最近变动与结果，避免日志交错串线
 - 投票区只显示**生效主题**（有启用票或驱动已给出实际结果）
 - `wireless_auth_*`（20w/30w/50w/80w/voice_box/magnet）与 `wireless_bpp/bppqc2/bppqc3/epp_in` 是按充电板型号/协议模式预置的热控表，无论连接哪台垫都会被整批投票，已直接隐藏
@@ -79,11 +79,12 @@ gradle assembleDebug
 `effective vote is now ...`）；**实际下发 ICL** 表示 `wireless loop: icl:` 打印的、
 经过协议/硬件/保护逻辑处理后的真实下发值。两者含义不同，页面会同时展示并给出差值。
 
-投票类型来自对 miro 固件 `mca_*.ko` 的反汇编核实，而非按单位猜测：
+投票类型大部分来自对 miro 固件 `mca_*.ko` 的反汇编核实，而非按单位猜测；`buck_charge_curr` 标注为项目假设（`MIN_ASSUMED`），无驱动 effective 行时仅作“参考推算”：
 
 | 类型 | 含义 | 已核实的 votable 示例 |
 |---|---|---|
-| MIN | 启用票中取最小 | wireless_buck_input、buck_charge_curr、wireless_*_in、wireless_sw_*_ich、wls_single/multi_chg_cur、div*、single/multi_chg_cur |
+| MIN | 启用票中取最小 | wireless_buck_input、wireless_*_in、wireless_sw_*_ich、wls_single/multi_chg_cur、div*、single/multi_chg_cur |
+| MIN_ASSUMED | 项目假设为最小（未独立核实） | buck_charge_curr（仅参考推算） |
 | FIRST_NONZERO | 首个启用且非零的投票 | quick_chg_disable、wls_quick_chg_disable |
 | FIRST_ZERO | 首个启用且为零的投票 | quick_chg_en |
 | UNKNOWN | 未核实，不做推算，单位也不猜测 | 其余主题 |

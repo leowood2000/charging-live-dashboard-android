@@ -76,6 +76,11 @@ public final class SnapshotCollector {
     private volatile boolean lastWiredCurCp = false;
     private volatile JSONObject lastWiredCurMax = null;
     private volatile JSONObject lastWiredStageCurMax = null;
+    /** 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）。 */
+    private volatile String lastCurDecisionKey = null;
+    private volatile String lastWiredCurMaxKey = null;
+    private volatile String lastWiredStageCurMaxKey = null;
+    private volatile String lastWlsIclKey = null;
     /** 有线 Buck 证据：buckchg 策略活动（无 CP 证据时据此判 Buck）。 */
     private volatile boolean lastWiredBuck = false;
     /** 有线输入遥测缓存：CP regulation 与 Buck status 各一份，按 wired_cp.state 选择来源。 */
@@ -177,33 +182,48 @@ public final class SnapshotCollector {
                     lastWlsIcl = null;
                     lastWlsIclAt = null;
                     lastWlsIclLogTime = null;
+                    lastWlsIclKey = null;
                     lastQuickCurMax = null;
                     lastBuckFcc = null;
                     lastCpMode = null;
                     lastCpWorkMode = null;
                     lastCurDecision = null;
+                    lastCurDecisionKey = null;
                     lastWlsMode = "unknown";
                     lastRxIoutLimit = null;
                 } else {
-                    JSONObject wm = parseWirelessMode(
-                            splitAfterLastWirelessAttach(sessionLog));
+                    // 所有无线执行层数据统一按最近一次 power_good_on 截断，
+                    // 避免上一会话的 ICL/buck_fcc 混进新会话
+                    String wtail = splitAfterLastWirelessAttach(sessionLog);
+                    JSONObject wm = parseWirelessMode(wtail);
                     lastWlsMode = wm.optString("mode", "unknown");
                     lastRxIoutLimit = wm.isNull("rx_iout_limit")
                             ? null : wm.getInt("rx_iout_limit");
-                    WlsIcl icl = parseWlsIcl(sessionLog);
+                    WlsIcl icl = parseWlsIcl(wtail);
                     if (icl != null) {
-                        lastWlsIcl = icl.value;
-                        lastWlsIclAt = icl.at;
-                        lastWlsIclLogTime = icl.logTime;
+                        String key = icl.value + "|" + icl.logTime;
+                        if (!key.equals(lastWlsIclKey)) {
+                            lastWlsIclKey = key;
+                            lastWlsIcl = icl.value;
+                            lastWlsIclAt = icl.at;
+                            lastWlsIclLogTime = icl.logTime;
+                        }
                     }
-                    Integer bf = parseBuckFcc(sessionLog);
+                    Integer bf = parseBuckFcc(wtail);
                     if (bf != null) lastBuckFcc = bf;
                 }
             }
             // 功率路径通道：高频信号，手机端已 tail -n 200 封顶
             if (ppReadOk) {
-                Integer qcm = parseQuickCurMax(ppLog);
-                if (qcm != null) lastQuickCurMax = qcm;
+                // quick wireless cur_max 同样只取最近一次无线会话之后，
+                // 断开时保持清空，避免旧窗口里的 Final 又被写回
+                if (isLastWirelessPowerOff(ppLog)) {
+                    lastQuickCurMax = null;
+                } else {
+                    String wt = splitAfterLastWirelessAttach(ppLog);
+                    Integer qcm = parseQuickCurMax(wt);
+                    if (qcm != null) lastQuickCurMax = qcm;
+                }
                 JSONObject cpState = parseSessionCpState(ppLog);
                 // 有线输入遥测：只解析最后一次会话边界之后的日志段；
                 // 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
@@ -236,13 +256,20 @@ public final class SnapshotCollector {
                     lastCpWorkMode = cpState.isNull("w_work") ? null : cpState.getInt("w_work");
                     lastCurDecision = cpState.isNull("w_decision")
                             ? null : cpState.getJSONObject("w_decision");
+                    lastCurDecisionKey = null;
                 } else {
                     if (!cpState.isNull("w_mode")) lastCpMode = cpState.getInt("w_mode");
                     if (!cpState.isNull("w_work")) {
                         lastCpWorkMode = cpState.getInt("w_work");
                     }
                     if (!cpState.isNull("w_decision")) {
-                        lastCurDecision = cpState.getJSONObject("w_decision");
+                        JSONObject wd = cpState.getJSONObject("w_decision");
+                        String key = wd.optString("log_time", "") + "|"
+                                + wd.opt("final");
+                        if (!key.equals(lastCurDecisionKey)) {
+                            lastCurDecisionKey = key;
+                            lastCurDecision = wd;
+                        }
                     }
                 }
                 // 有线 track：usb online / real_type changed 边界
@@ -255,6 +282,8 @@ public final class SnapshotCollector {
                             ? null : cpState.getJSONObject("d_cur_max");
                     lastWiredStageCurMax = cpState.isNull("d_stage_cur_max")
                             ? null : cpState.getJSONObject("d_stage_cur_max");
+                    lastWiredCurMaxKey = null;
+                    lastWiredStageCurMaxKey = null;
                 } else {
                     String ds = cpState.optString("d_state", "unknown");
                     if (!"unknown".equals(ds)) {
@@ -270,10 +299,22 @@ public final class SnapshotCollector {
                         lastWiredBuck = true;
                     }
                     if (!cpState.isNull("d_cur_max")) {
-                        lastWiredCurMax = cpState.getJSONObject("d_cur_max");
+                        JSONObject wcm = cpState.getJSONObject("d_cur_max");
+                        String key = wcm.optString("log_time", "") + "|"
+                                + wcm.opt("cur_max");
+                        if (!key.equals(lastWiredCurMaxKey)) {
+                            lastWiredCurMaxKey = key;
+                            lastWiredCurMax = wcm;
+                        }
                     }
                     if (!cpState.isNull("d_stage_cur_max")) {
-                        lastWiredStageCurMax = cpState.getJSONObject("d_stage_cur_max");
+                        JSONObject wsm = cpState.getJSONObject("d_stage_cur_max");
+                        String key = wsm.optString("log_time", "") + "|"
+                                + wsm.opt("cur_max");
+                        if (!key.equals(lastWiredStageCurMaxKey)) {
+                            lastWiredStageCurMaxKey = key;
+                            lastWiredStageCurMax = wsm;
+                        }
                     }
                 }
             }
@@ -806,7 +847,9 @@ public final class SnapshotCollector {
         VOTE_POLICIES.put("wireless_sw_qc_ich", "MIN");
         VOTE_POLICIES.put("wireless_sw_thermal_ich", "MIN");
         // 项目配置（用户确认）：有线 buck 充电电流按 MIN 推算
-        VOTE_POLICIES.put("buck_charge_curr", "MIN");
+        // 项目假设（用户确认，未从 .ko 独立核实）：有线 buck 充电电流按 MIN 推算，
+        // 无 effective 行时只允许“参考推算”，不进入总仲裁 fallback
+        VOTE_POLICIES.put("buck_charge_curr", "MIN_ASSUMED");
         // mca_quick_wireless.ko：wls_single/multi_chg_cur 为 MIN，disable 为 type2（首个非零）
         VOTE_POLICIES.put("wls_single_chg_cur", "MIN");
         VOTE_POLICIES.put("wls_multi_chg_cur", "MIN");
