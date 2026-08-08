@@ -44,6 +44,7 @@ public final class SnapshotCollector {
     };
 
     private static final String BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent";
+    private static final String USB_UEVENT = "/sys/class/power_supply/usb/uevent";
     private static final int HISTORY_MAX = 180;
     private static final int SESSION_MAX = 3;
     private static final int SESSION_EVENT_MAX = 100;
@@ -75,6 +76,9 @@ public final class SnapshotCollector {
     private volatile boolean lastWiredCurCp = false;
     /** 有线 Buck 证据：buckchg 策略活动（无 CP 证据时据此判 Buck）。 */
     private volatile boolean lastWiredBuck = false;
+    /** 有线输入遥测缓存：CP regulation 与 Buck status 各一份，按 wired_cp.state 选择来源。 */
+    private volatile JSONObject lastWiredCpTel = null;
+    private volatile JSONObject lastWiredBuckTel = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private volatile boolean powerPathLogsStale = false;
@@ -116,6 +120,9 @@ public final class SnapshotCollector {
             JSONObject sample = new JSONObject();
             JSONObject d = parsed.getJSONObject("derived");
             sample.put("t", System.currentTimeMillis() / 1000.0)
+                    .put("input_source", d.opt("input_source"))
+                    .put("input_voltage_mv", d.opt("input_voltage_mv"))
+                    .put("input_current_ma", d.opt("input_current_ma"))
                     .put("vout", d.opt("vout")).put("vrect", d.opt("vrect"))
                     .put("iout", d.opt("iout")).put("input_power_w", d.opt("input_power_w"))
                     .put("battery_power_w", d.opt("battery_power_w"))
@@ -183,6 +190,16 @@ public final class SnapshotCollector {
                 Integer qcm = parseQuickCurMax(ppLog);
                 if (qcm != null) lastQuickCurMax = qcm;
                 JSONObject cpState = parseSessionCpState(ppLog);
+                // 有线输入遥测：CP regulation 与 Buck status 各解析一份
+                if (isWiredDisconnected(ppLog)) {
+                    lastWiredCpTel = null;
+                    lastWiredBuckTel = null;
+                } else {
+                    JSONObject cpTel = parseWiredCpTelemetry(ppLog);
+                    JSONObject buckTel = parseWiredBuckTelemetry(ppLog);
+                    if (cpTel != null) lastWiredCpTel = cpTel;
+                    if (buckTel != null) lastWiredBuckTel = buckTel;
+                }
                 // 无线 track：power_good 边界
                 if (cpState.optBoolean("w_boundary", false)) {
                     lastCpMode = cpState.isNull("w_mode") ? null : cpState.getInt("w_mode");
@@ -353,7 +370,9 @@ public final class SnapshotCollector {
                     .append("' 2>/dev/null; ");
         }
         sb.append("echo '###").append(NODES.length).append("'; cat '")
-                .append(BATTERY_UEVENT).append("' 2>/dev/null");
+                .append(BATTERY_UEVENT).append("' 2>/dev/null; ")
+                .append("echo '###").append(NODES.length + 1).append("'; cat '")
+                .append(USB_UEVENT).append("' 2>/dev/null");
         return RootShell.exec(sb.toString(), 20);
     }
 
@@ -392,6 +411,8 @@ public final class SnapshotCollector {
                 + "strategy_quickchg_map_ibus_to_fsw|"
                 + "cur_work_cp|"
                 + "strategy_buckchg_charge_limit|"
+                + "strategy_buckchg_update_charge_status|"
+                + "mca_quick_charge_regulation|"
                 + "mca_wireless_quick_charge_select_cur_work_mode|"
                 + "mca_wireless_quick_charge_select_max_ibat";
         return RootShell.exec("tail -c 1048576 " + MCA_LOG_DIR + "/" + fname
@@ -403,6 +424,7 @@ public final class SnapshotCollector {
         String[] raw = batch.split("(?=###\\d+)");
         JSONObject nodesObj = new JSONObject();
         JSONObject batteryRaw = new JSONObject();
+        JSONObject usbRaw = new JSONObject();
         for (String part : raw) {
             if (!part.startsWith("###")) continue;
             String num = part.substring(3).split("\\s", 2)[0];
@@ -413,6 +435,8 @@ public final class SnapshotCollector {
                         .put("raw", body).put("value", body).put("ok", !body.isEmpty()));
             } else if (i == NODES.length) {
                 batteryRaw = parseUevent(body);
+            } else if (i == NODES.length + 1) {
+                usbRaw = parseUevent(body);
             }
         }
 
@@ -450,7 +474,95 @@ public final class SnapshotCollector {
         putFinite(derived, "vout", vout);
         putFinite(derived, "vrect", wls.optDouble("vrect", Double.NaN));
         putFinite(derived, "iout", iout);
-        putFinite(derived, "input_power_w", vout * iout / 1e6);
+
+        // 有线输入遥测：按 wired_cp.state 选择来源（CP→regulation，Buck→buckchg，
+        // unknown→最新一条），USB uevent 仅作兜底且永远带 source/时间。
+        boolean usbOnline = "1".equals(usbRaw.optString("ONLINE", ""));
+        boolean usbKnownOff = "0".equals(usbRaw.optString("ONLINE", ""));
+        double usbVbusMv = optNum(usbRaw, "VOLTAGE_NOW") / 1000.0;
+        double usbIbusMa = optNum(usbRaw, "CURRENT_NOW") / 1000.0;
+
+        JSONObject cpTel = lastWiredCpTel;
+        JSONObject buckTel = lastWiredBuckTel;
+        JSONObject chosen;
+        String wstate = lastWiredState == null ? "unknown" : lastWiredState;
+        if ("cp".equals(wstate)) {
+            chosen = cpTel != null ? cpTel : buckTel;
+        } else if ("buck".equals(wstate)) {
+            chosen = buckTel != null ? buckTel : cpTel;
+        } else if (cpTel != null && buckTel != null) {
+            chosen = cpTel.optString("log_time", "").compareTo(
+                    buckTel.optString("log_time", "")) >= 0 ? cpTel : buckTel;
+        } else {
+            chosen = cpTel != null ? cpTel : buckTel;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        boolean wiredStale = false;
+        if (chosen != null) {
+            long age = nowMs - chosen.optLong("at", 0L);
+            long limit = "quick_charge_regulation".equals(chosen.optString("source", ""))
+                    ? 12000 : 25000;
+            wiredStale = age > limit;
+        }
+        double wiredVbusMv = Double.NaN;
+        double wiredIbusMa = Double.NaN;
+        String wiredSource = null;
+        String wiredLogTime = "";
+        long wiredAt = 0L;
+        // 遥测已陈旧且 USB uevent 在线时，用每 3s 快采的 uevent 覆盖（仍保留 source）
+        if (chosen != null && !usbKnownOff && !(wiredStale && usbOnline)) {
+            wiredVbusMv = chosen.optDouble("vbus_mv", Double.NaN);
+            wiredIbusMa = chosen.optDouble("ibus_ma", Double.NaN);
+            wiredSource = chosen.optString("source", null);
+            wiredLogTime = chosen.optString("log_time", "");
+            wiredAt = chosen.optLong("at", 0L);
+        } else if (usbOnline) {
+            wiredVbusMv = usbVbusMv;
+            wiredIbusMa = usbIbusMa;
+            wiredSource = "usb_uevent";
+            wiredAt = nowMs;
+        }
+        boolean wiredOnline = Double.isFinite(wiredVbusMv) && Double.isFinite(wiredIbusMa);
+        double wiredPower = wiredOnline ? wiredVbusMv * wiredIbusMa / 1000.0 : Double.NaN;
+
+        // 当前输入源抽象层：有线优先（避免旧无线残留值覆盖），无输入时为 none
+        String inputSource;
+        double inputVolMv = Double.NaN;
+        double inputCurMa = Double.NaN;
+        double inputPower = Double.NaN;
+        if (wiredOnline) {
+            inputSource = "wired";
+            inputVolMv = wiredVbusMv;
+            inputCurMa = wiredIbusMa;
+            inputPower = wiredPower;
+        } else if (Double.isFinite(vout) && Double.isFinite(iout)
+                && (vout != 0 || iout != 0)) {
+            inputSource = "wireless";
+            inputVolMv = vout;
+            inputCurMa = iout;
+            inputPower = vout * iout / 1e6;
+        } else {
+            inputSource = "none";
+        }
+
+        derived.put("input_source", inputSource);
+        putFinite(derived, "input_power_w", inputPower);
+        putFinite(derived, "input_voltage_mv", inputVolMv);
+        putFinite(derived, "input_current_ma", inputCurMa);
+        derived.put("wired_online", wiredOnline);
+        putFinite(derived, "wired_vbus_mv", wiredVbusMv);
+        putFinite(derived, "wired_ibus_ma", wiredIbusMa);
+        putFinite(derived, "wired_input_power_w", wiredPower);
+        derived.put("wired_input_source", wiredSource == null ? JSONObject.NULL : wiredSource);
+        if (wiredAt == 0L) {
+            derived.put("wired_input_at", JSONObject.NULL);
+        } else {
+            derived.put("wired_input_at", wiredAt);
+        }
+        derived.put("wired_input_log_time", wiredLogTime);
+        derived.put("wired_input_stale", wiredStale);
+        derived.put("wired_usb_online", usbOnline);
         putFinite(derived, "battery_power_w", battCurMa * battVolMv / 1e6);
         putFinite(derived, "batt_current_ma", battCurMa);
         putFinite(derived, "batt_voltage_mv", battVolMv);
@@ -901,6 +1013,69 @@ public final class SnapshotCollector {
             }
         }
         return result;
+    }
+
+    private static final Pattern WIRED_BUCK_TELEMETRY_RE = Pattern.compile(
+            "strategy_buckchg_update_charge_status:1463 pmic_chg_status: (\\d+), " +
+            "chg_status: (\\d+), chg_en: \\[(\\d+)\\]\\[(\\w+)\\], chg_type: (\\d+), " +
+            "vbat: (\\d+), vbus: (\\d+), ibus: (\\d+)");
+
+    private static final Pattern WIRED_CP_TELEMETRY_RE = Pattern.compile(
+            "mca_quick_charge_regulation:1942 cur_stage\\[(\\d+)\\]: " +
+            "adp_volt: (\\d+)/(\\d+), " +
+            "ibat: ([\\d\\-]+)/([\\d\\-]+)/([\\d\\-]+)/([\\d\\-]+), " +
+            "vbat: (\\d+)/(\\d+), ibus: (\\d+),");
+
+    /** 最新一条 buckchg 状态行：vbus/ibus 为 µV/µA，返回 mV/mA。 */
+    private JSONObject parseWiredBuckTelemetry(String text) throws JSONException {
+        JSONObject last = null;
+        for (String line : text.split("\n")) {
+            Matcher m = WIRED_BUCK_TELEMETRY_RE.matcher(line);
+            if (!m.find()) continue;
+            Matcher tm = VOTE_TIME_RE.matcher(line);
+            last = new JSONObject()
+                    .put("vbus_mv", Integer.parseInt(m.group(7)) / 1000.0)
+                    .put("ibus_ma", Integer.parseInt(m.group(8)) / 1000.0)
+                    .put("chg_en", Integer.parseInt(m.group(3)))
+                    .put("chg_en_client", m.group(4))
+                    .put("chg_type", Integer.parseInt(m.group(5)))
+                    .put("source", "buckchg_telemetry")
+                    .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
+                    .put("at", System.currentTimeMillis());
+        }
+        return last;
+    }
+
+    /** 最新一条有线 quick charge regulation 行：adp_volt 第二值为实测（mV），ibus 为 mA。 */
+    private JSONObject parseWiredCpTelemetry(String text) throws JSONException {
+        JSONObject last = null;
+        for (String line : text.split("\n")) {
+            Matcher m = WIRED_CP_TELEMETRY_RE.matcher(line);
+            if (!m.find()) continue;
+            Matcher tm = VOTE_TIME_RE.matcher(line);
+            last = new JSONObject()
+                    .put("vbus_mv", Integer.parseInt(m.group(3)))
+                    .put("ibus_ma", Integer.parseInt(m.group(10)))
+                    .put("chg_en", 1)
+                    .put("chg_en_client", "quick_charge")
+                    .put("source", "quick_charge_regulation")
+                    .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
+                    .put("at", System.currentTimeMillis());
+        }
+        return last;
+    }
+
+    /** 最新一条有线会话边界是否为断开（usb online: 0 / real_type => 0）。 */
+    private boolean isWiredDisconnected(String text) {
+        String last = "";
+        for (String line : text.split("\n")) {
+            if (line.contains("usb online:") || line.contains("real_type changed:")) {
+                last = line;
+            }
+        }
+        if (last.isEmpty()) return false;
+        if (last.contains("usb online: 0")) return true;
+        return last.matches(".*real_type changed: \\d+ => 0.*");
     }
 
     /** 无线/有线 CP 状态彻底解耦：power_good 只重置无线；usb online/real_type changed 只重置有线；
