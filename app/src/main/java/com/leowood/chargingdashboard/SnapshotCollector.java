@@ -214,8 +214,16 @@ public final class SnapshotCollector {
                         .put("actual_limit_source",
                                 lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
             }
+            // 三态：cp（本会话 operation mode>0）/ buck（本会话明确 mode=0）/ unknown（无新日志待确认）
+            if (lastCpMode != null) {
+                buck.put("cp_state", lastCpMode > 0 ? "cp" : "buck");
+            } else {
+                buck.put("cp_state", "unknown");
+            }
             buck.put("cp_active", lastCpMode != null && lastCpMode > 0);
-            if (lastCpWorkMode != null) buck.put("cp_ratio", lastCpWorkMode);
+            if (lastCpMode != null && lastCpMode > 0 && lastCpWorkMode != null) {
+                buck.put("cp_ratio", lastCpWorkMode);
+            }
             if (lastCurDecision != null) buck.put("cur_max_decision", lastCurDecision);
         }
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
