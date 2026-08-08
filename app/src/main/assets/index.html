@@ -870,41 +870,64 @@ function renderVoters(d) {
       }
       summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
       if (wcp.state === "cp") {
-        // 有线 CP：Quick Charge 当前电池目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
+        // 有线 CP：Quick Charge 算法目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
         const wd = wcp.cur_max && wcp.cur_max.cur_max !== undefined && wcp.cur_max.cur_max !== null
           ? wcp.cur_max : null;
         const wst = wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
           && wcp.stage_cur_max.cur_max !== null ? wcp.stage_cur_max : null;
         const curAge = o => (o && o.at) ? Math.max(0, Math.round((Date.now() - o.at) / 1000)) : null;
-        // CP 路径上限：div4_single / div4_multi 只是约束项，不冒充最终电流
-        const limSingle = effectiveOf(topics.div4_single);
-        const limMulti = effectiveOf(topics.div4_multi);
-        const cpLim = limSingle || limMulti;
-        // 实际目标 = min(cur_max, CP 路径上限)，避免把算法原始 cur_max 当成可达到目标
-        const effTarget = raw => (cpLim && cpLim.value < raw)
-          ? { value: cpLim.value, capped: true }
-          : { value: raw, capped: false };
+        // 按分压比选路径限制表；single/multi 拓扑未确认前不自动二选一
+        const ratio = wcp.ratio;
+        const divSingle = ratio === 4 ? "div4_single"
+          : ratio === 2 ? "div2_single"
+          : ratio === 1 ? "div1_single" : null;
+        const divMulti = ratio === 4 ? "div4_multi"
+          : ratio === 2 ? "div2_multi"
+          : ratio === 1 ? "div1_multi" : null;
+        const limSingle = divSingle ? effectiveOf(topics[divSingle]) : null;
+        const limMulti = divMulti ? effectiveOf(topics[divMulti]) : null;
+        // 算法目标（原始 cur_max，不预先取 min；限制关系由下面两层表达）
         if (wd) {
           const age = curAge(wd);
-          const t = effTarget(wd.cur_max);
-          summary.push(`<span class="chip" title="${t.capped
-            ? `quick_charge cur_max ${wd.cur_max}mA 被 CP 路径上限 ${cpLim.value}mA 约束，实际目标取较小值`
-            : "mca_quick_charge_select_max_ibat 最终行 cur_max（算法目标，非实测电流）"}${wd.log_time ? " · 日志 " + esc(wd.log_time) : ""}">` +
-            `电池充电目标<b>${fmt(t.value, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}${t.capped ? " · 受路径上限约束" : ""}</small></span>`);
+          summary.push(`<span class="chip" title="mca_quick_charge_select_max_ibat 最终行 cur_max（算法目标，非实测电流，可能被路径限制压住）${wd.log_time ? " · 日志 " + esc(wd.log_time) : ""}">` +
+            `Quick Charge 算法目标<b>${fmt(wd.cur_max, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}</small></span>`);
         } else if (wst) {
           const age = curAge(wst);
-          const t = effTarget(wst.cur_max);
-          summary.push(`<span class="chip" title="${t.capped
-            ? `cur_stage cur_max ${wst.cur_max}mA 被 CP 路径上限 ${cpLim.value}mA 约束，实际目标取较小值`
-            : "仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值"}${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
-            `阶段充电目标<b>${fmt(t.value, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值${t.capped ? " · 受路径上限约束" : ""}</small></span>`);
+          summary.push(`<span class="chip" title="仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
+            `阶段算法目标<b>${fmt(wst.cur_max, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值</small></span>`);
         } else {
-          summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">电池充电目标<b>--</b><small>待刷新</small></span>`);
+          summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">Quick Charge 算法目标<b>--</b><small>待刷新</small></span>`);
         }
-        if (cpLim) {
-          const limTopic = limSingle ? "div4_single" : "div4_multi";
-          summary.push(`<span class="chip" title="${limTopic} 投票上限（CP 路径约束，非最终充电目标）">` +
-            `CP ${wcp.ratio || ""}:1 路径上限<b>${fmt(cpLim.value, 0)}</b><small>${esc(cpLim.client)} · ${limTopic}</small></span>`);
+        // CP 路径限制：single/multi 同值视为共同上限，异值并列展示并标拓扑待确认
+        const pushLim = (lim, topic, extra) => {
+          if (!lim) return;
+          summary.push(`<span class="chip" title="${topic} 投票上限（CP 路径约束，非最终充电目标）">` +
+            `CP ${ratio || ""}:1 路径限制<b>${fmt(lim.value, 0)}</b><small>${esc(lim.client)} · ${topic}${extra || ""}</small></span>`);
+        };
+        if (limSingle && limMulti) {
+          if (limSingle.value === limMulti.value) {
+            pushLim(limSingle, divSingle + "/" + divMulti);
+          } else {
+            pushLim(limSingle, divSingle, " · 拓扑待确认");
+            pushLim(limMulti, divMulti, " · 拓扑待确认");
+          }
+        } else {
+          pushLim(limSingle || limMulti, (limSingle ? divSingle : divMulti));
+        }
+        // 综合有效上限：仅当路径限制可确定（单一表，或双表同值）时才推算 min
+        const rawTarget = wd ? wd.cur_max : (wst ? wst.cur_max : null);
+        const knownLim = limSingle && limMulti
+          ? (limSingle.value === limMulti.value ? limSingle : null)
+          : (limSingle || limMulti);
+        if (rawTarget !== null && knownLim) {
+          const eff = Math.min(rawTarget, knownLim.value);
+          const capped = knownLim.value < rawTarget;
+          summary.push(`<span class="chip" title="min(quick_charge cur_max ${rawTarget}mA, ${knownLim.value}mA) = ${eff}mA（推算，非驱动直接输出）">` +
+            `综合有效上限<b>${fmt(eff, 0)}</b><small>推算${capped ? " · 受路径限制约束" : " · cur_max 主导"}</small></span>`);
+        } else if (rawTarget !== null && limSingle && limMulti && limSingle.value !== limMulti.value) {
+          summary.push(`<span class="chip" title="single/multi 两张表值不同，无法确定当前生效路径限制，不做推算">综合有效上限<b>--</b><small>single/multi 拓扑待确认</small></span>`);
+        } else if (rawTarget !== null && !divSingle) {
+          summary.push(`<span class="chip" title="分压比未知，无法选择对应 div 限制表，不做推算">综合有效上限<b>--</b><small>分压比待确认</small></span>`);
         }
         if (battMa !== null && battMa !== undefined) {
           summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b>${fmt(Math.abs(battMa), 0)}</b><small>battery</small></span>`);
