@@ -69,6 +69,10 @@ public final class SnapshotCollector {
     private volatile Integer lastCpWorkMode = null;
     /** select_max_ibat 完整决策（输入 + cur_max Final + 日志时间）。 */
     private volatile JSONObject lastCurDecision = null;
+    /** 有线 CP 状态：会话内最后一次 operation mode / work_mode/ratio / cur_work_cp 证据。 */
+    private volatile Integer lastWiredCpMode = null;
+    private volatile Integer lastWiredCpRatio = null;
+    private volatile boolean lastWiredCurCp = false;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private String lastError = "";
@@ -175,6 +179,11 @@ public final class SnapshotCollector {
                                 ? null : cpState.getInt("cp_work_mode");
                         lastCurDecision = cpState.isNull("decision")
                                 ? null : cpState.getJSONObject("decision");
+                        lastWiredCpMode = cpState.isNull("wired_mode")
+                                ? null : cpState.getInt("wired_mode");
+                        lastWiredCpRatio = cpState.isNull("wired_ratio")
+                                ? null : cpState.getInt("wired_ratio");
+                        lastWiredCurCp = cpState.optBoolean("wired_cur_cp", false);
                     } else {
                         if (!cpState.isNull("cp_mode")) lastCpMode = cpState.getInt("cp_mode");
                         if (!cpState.isNull("cp_work_mode")) {
@@ -182,6 +191,15 @@ public final class SnapshotCollector {
                         }
                         if (!cpState.isNull("decision")) {
                             lastCurDecision = cpState.getJSONObject("decision");
+                        }
+                        if (!cpState.isNull("wired_mode")) {
+                            lastWiredCpMode = cpState.getInt("wired_mode");
+                        }
+                        if (!cpState.isNull("wired_ratio")) {
+                            lastWiredCpRatio = cpState.getInt("wired_ratio");
+                        }
+                        if (cpState.optBoolean("wired_cur_cp", false)) {
+                            lastWiredCurCp = true;
                         }
                     }
                 }
@@ -226,6 +244,26 @@ public final class SnapshotCollector {
             }
             if (lastCurDecision != null) buck.put("cur_max_decision", lastCurDecision);
         }
+        // 有线 CP 三态：cp / buck / unknown（本会话无 SC8581 模式日志则待确认）
+        JSONObject derived = core.optJSONObject("derived");
+        if (derived == null) {
+            derived = new JSONObject();
+            core.put("derived", derived);
+        }
+        String wstate;
+        if (lastWiredCpMode != null) {
+            wstate = lastWiredCpMode > 0 ? "cp" : "buck";
+        } else if (lastWiredCurCp) {
+            wstate = "cp";
+        } else {
+            wstate = "unknown";
+        }
+        derived.put("wired_cp", new JSONObject()
+                .put("state", wstate)
+                .put("ratio", "cp".equals(wstate) && lastWiredCpRatio != null
+                        ? lastWiredCpRatio : JSONObject.NULL)
+                .put("active", "cp".equals(wstate))
+                .put("cur_work_cp", lastWiredCurCp));
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
         JSONObject meta = core.optJSONObject("meta");
         if (meta == null) meta = new JSONObject();
@@ -802,6 +840,10 @@ public final class SnapshotCollector {
             "\\[tx_adapter_max:(\\d+)\\], \\[sw_qc_ichg:(\\d+)\\],\\[sw_thermal_ichg:(\\d+)\\]");
     private static final Pattern CUR_DECISION_FINAL_RE = Pattern.compile(
             "select_max_ibat:446 cur_max:\\[Final\\]: (\\d+)");
+    private static final Pattern WIRED_WORK_MODE_RE = Pattern.compile(
+            "update_work_mode_para:.*work_mode: (\\d+)");
+    private static final Pattern WIRED_RATIO_RE = Pattern.compile(
+            "map_ibus_to_fsw:.*ratio: (\\d+)");
 
     /** 取最新 select_max_ibat 完整决策：输入项 + cur_max:[Final] + 日志时间。 */
     private JSONObject parseQuickCurDecision(String text) throws JSONException {
@@ -836,24 +878,48 @@ public final class SnapshotCollector {
         Integer cpWorkMode = null;
         JSONObject decision = null;
         JSONObject inputs = null;
+        Integer wiredMode = null;
+        Integer wiredRatio = null;
+        boolean wiredCurCp = false;
         boolean boundarySeen = false;
         for (String line : text.split("\n")) {
-            if (line.contains("power_good_on") || line.contains("power_good_off")) {
+            if (line.contains("power_good_on") || line.contains("power_good_off")
+                    || line.contains("usb online: 0") || line.contains("usb online: 1")
+                    || line.contains("real_type changed:")) {
                 boundarySeen = true;
                 cpMode = null;
                 cpWorkMode = null;
                 decision = null;
                 inputs = null;
+                wiredMode = null;
+                wiredRatio = null;
+                wiredCurCp = false;
                 continue;
             }
             Matcher m = CP_MODE_RE.matcher(line);
             if (m.find()) {
                 cpMode = Integer.parseInt(m.group(1));
+                wiredMode = Integer.parseInt(m.group(1));
                 continue;
             }
             m = CP_WORK_MODE_RE.matcher(line);
             if (m.find()) {
                 cpWorkMode = Integer.parseInt(m.group(1));
+                continue;
+            }
+            m = WIRED_WORK_MODE_RE.matcher(line);
+            if (m.find()) {
+                wiredRatio = Integer.parseInt(m.group(1));
+                continue;
+            }
+            m = WIRED_RATIO_RE.matcher(line);
+            if (m.find()) {
+                wiredRatio = Integer.parseInt(m.group(1));
+                continue;
+            }
+            if (line.contains("mca_quick_charge_select_max_ibat:")
+                    && line.contains("cur_work_cp")) {
+                wiredCurCp = true;
                 continue;
             }
             m = CUR_DECISION_IN_RE.matcher(line);
@@ -879,7 +945,10 @@ public final class SnapshotCollector {
                 .put("boundary_seen", boundarySeen)
                 .put("cp_mode", cpMode == null ? JSONObject.NULL : cpMode)
                 .put("cp_work_mode", cpWorkMode == null ? JSONObject.NULL : cpWorkMode)
-                .put("decision", decision == null ? JSONObject.NULL : decision);
+                .put("decision", decision == null ? JSONObject.NULL : decision)
+                .put("wired_mode", wiredMode == null ? JSONObject.NULL : wiredMode)
+                .put("wired_ratio", wiredRatio == null ? JSONObject.NULL : wiredRatio)
+                .put("wired_cur_cp", wiredCurCp);
     }
 
     private static final java.util.Map<String, String> THERMAL_SCENES = new java.util.HashMap<>();
