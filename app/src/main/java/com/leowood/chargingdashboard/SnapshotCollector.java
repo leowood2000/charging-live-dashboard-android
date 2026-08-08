@@ -432,7 +432,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|BPP drawload|rx_iout_limit|epp plus";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|BPP drawload|rx_iout_limit|epp plus|EPP\\+|send_vout_range_request|set adapter voltage";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
@@ -1244,21 +1244,26 @@ public final class SnapshotCollector {
         return sb.toString();
     }
 
-    /** 无线控制模式：bpp（drawload 同域）/ epp_plus（wls_icl 与 iout 不同域）/ unknown。 */
+    /** 无线控制模式：bpp_drawload（同域）/ epp_qc（不同域）/ unknown，最后证据覆盖前证据。 */
     private JSONObject parseWirelessMode(String text) throws JSONException {
         String mode = "unknown";
         Integer rxLimit = null;
         boolean qcEnabled = false;
         for (String line : text.split("\n")) {
-            if (line.contains("BPP drawload")) mode = "bpp";
-            if (line.contains("epp plus")) mode = "epp_plus";
+            if (line.contains("BPP drawload")) mode = "bpp_drawload";
+            if (line.contains("epp plus") || line.contains("EPP+")
+                    || line.contains("send_vout_range_request")
+                    || line.contains("set adapter voltage")
+                    || line.contains("rx_iout_limit")
+                    || line.contains("can quick charge!")) {
+                mode = "epp_qc";
+            }
             Matcher m = RX_IOUT_LIMIT_RE.matcher(line);
             // 函数名 ...op_get_rx_iout_limit:421 里的行号也会匹配，
             // 必须取该行最后一次匹配（真正的 rx_iout_limit: 3800）
             while (m.find()) rxLimit = Integer.parseInt(m.group(1));
             if (line.contains("can quick charge!")) qcEnabled = true;
         }
-        if (qcEnabled && "unknown".equals(mode)) mode = "epp_plus";
         return new JSONObject()
                 .put("mode", mode)
                 .put("rx_iout_limit", rxLimit == null ? JSONObject.NULL : rxLimit)

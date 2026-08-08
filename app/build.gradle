@@ -10,8 +10,8 @@ android {
         applicationId "com.leowood.chargingdashboard"
         minSdk 28
         targetSdk 34
-        versionCode 35
-        versionName "0.9.8"
+        versionCode 36
+        versionName "0.9.9"
     }
 
     buildTypes {
