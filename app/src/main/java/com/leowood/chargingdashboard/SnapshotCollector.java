@@ -356,7 +356,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat|sc8581_set_operation_mode|mca_wireless_quick_charge_select_cur_work_mode";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat|sc8581_set_operation_mode|mca_wireless_quick_charge_select_cur_work_mode|usb online|real_type changed|mca_quick_charge_update_work_mode_para|strategy_quickchg_map_ibus_to_fsw|mca_quick_charge_select_max_ibat|mca_quick_charge_select_cur_work_mode";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确

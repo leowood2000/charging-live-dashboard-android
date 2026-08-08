@@ -39,6 +39,7 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 功率路径三态显示：cp（本会话 operation mode>0，附 2:1 等分压比）/ buck（本会话明确 mode=0）/ Buck / CP 未激活（待确认）（本会话尚无 SC8581 模式日志）
 - 有线功率路径正式接入：会话边界（`usb online` / `real_type changed` / `power_good`）内按时间顺序取最后一次 `sc8581 operation mode` 判定 cp/buck；`quickchg work_mode` 与 `map_ibus_to_fsw ratio` 提供分压比；`cur_work_cp` 作交叉证据；输出 `derived.wired_cp`
 - 有线 CP 激活时只显示对应比例的 div 卡（4:1 → div4_single/div4_multi）+ single/multi_chg_cur + thermal_flip；Buck/未知时隐藏全部 div，保留 buck_input / buck_charge_curr / chg_enable / quick_chg_disable / input_voltage / smartchg_delta_ichg / JEITA；`buck_5v/9v_*` 档位表与 `wireless_*` 始终隐藏
+- 日志抓取白名单补齐有线 quickchg 信号（`update_work_mode_para` / `map_ibus_to_fsw` / `mca_quick_charge_select_max_ibat` / `select_cur_work_mode`）与有线会话边界（`usb online` / `real_type changed`），保证 120W 快充时能解析出比例与 cur_work_cp
 - ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
 - 总仲裁只显示实际结果：无线输入限流在仲裁值未生效时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless cur_max / buck_fcc），不再误标为无线输入电流；保留生效场景 / 虚拟温度 / 电池温度
 - 实际下发 ICL / 实时 iout / 限流未生效细节移到 wireless_buck_input 详情卡，并按物理功率比（icl × vrect / vbat）判定
