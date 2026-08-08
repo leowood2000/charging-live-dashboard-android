@@ -684,6 +684,7 @@ public final class SnapshotCollector {
         // 已从 .ko 核实为电流类投票的主题才显式标注 mA，未知主题默认空单位
         VOTE_UNITS.put("wireless_buck_input", "mA");
         VOTE_UNITS.put("buck_charge_curr", "mA");
+        VOTE_UNITS.put("buck_input", "mA");
         VOTE_UNITS.put("wireless_bpp_in", "mA");
         VOTE_UNITS.put("wireless_bppqc2_in", "mA");
         VOTE_UNITS.put("wireless_bppqc3_in", "mA");

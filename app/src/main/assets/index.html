@@ -858,6 +858,10 @@ function renderVoters(d) {
         if (ppStaleD) staleD = " · 路径日志读取异常";
       }
       summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
+      // 有线输入限流：buck_input 是 USB 输入侧 ICL votable；CP 路径下不在实际功率路径上，不展示
+      if (wcp.state !== "cp") {
+        addSummary("有线输入限流", effectiveOf(topics.buck_input), v => `${v}mA`);
+      }
     }
     const battMa = d.derived && d.derived.batt_current_ma;
     const dec = buck && buck.cur_max_decision;
