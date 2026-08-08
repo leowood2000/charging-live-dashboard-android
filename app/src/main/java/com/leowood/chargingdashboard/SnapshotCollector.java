@@ -79,6 +79,8 @@ public final class SnapshotCollector {
     /** 有线输入遥测缓存：CP regulation 与 Buck status 各一份，按 wired_cp.state 选择来源。 */
     private volatile JSONObject lastWiredCpTel = null;
     private volatile JSONObject lastWiredBuckTel = null;
+    /** 新会话/协议变化后尚无策略遥测：页面回退 USB uevent 并标记“等待策略遥测”。 */
+    private volatile boolean lastWiredTelWaiting = false;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private volatile boolean powerPathLogsStale = false;
@@ -190,15 +192,30 @@ public final class SnapshotCollector {
                 Integer qcm = parseQuickCurMax(ppLog);
                 if (qcm != null) lastQuickCurMax = qcm;
                 JSONObject cpState = parseSessionCpState(ppLog);
-                // 有线输入遥测：CP regulation 与 Buck status 各解析一份
+                // 有线输入遥测：只解析最后一次会话边界之后的日志段；
+                // 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
+                // 新会话/协议变化后尚无遥测时清空缓存并标记等待，页面回退 USB uevent
                 if (isWiredDisconnected(ppLog)) {
                     lastWiredCpTel = null;
                     lastWiredBuckTel = null;
+                    lastWiredTelWaiting = false;
                 } else {
-                    JSONObject cpTel = parseWiredCpTelemetry(ppLog);
-                    JSONObject buckTel = parseWiredBuckTelemetry(ppLog);
-                    if (cpTel != null) lastWiredCpTel = cpTel;
-                    if (buckTel != null) lastWiredBuckTel = buckTel;
+                    String tail = splitAfterLastWiredBoundary(ppLog);
+                    JSONObject cpTel = parseWiredCpTelemetry(tail);
+                    JSONObject buckTel = parseWiredBuckTelemetry(tail);
+                    if (cpTel == null && buckTel == null) {
+                        lastWiredCpTel = null;
+                        lastWiredBuckTel = null;
+                        lastWiredTelWaiting = hasWiredBoundary(ppLog);
+                    } else {
+                        lastWiredTelWaiting = false;
+                        if (cpTel != null && !sameTelKey(cpTel, lastWiredCpTel)) {
+                            lastWiredCpTel = cpTel;
+                        }
+                        if (buckTel != null && !sameTelKey(buckTel, lastWiredBuckTel)) {
+                            lastWiredBuckTel = buckTel;
+                        }
+                    }
                 }
                 // 无线 track：power_good 边界
                 if (cpState.optBoolean("w_boundary", false)) {
@@ -562,6 +579,14 @@ public final class SnapshotCollector {
             derived.put("wired_input_at", wiredAt);
         }
         derived.put("wired_input_log_time", wiredLogTime);
+        long wiredAge = wiredAt == 0L ? -1L : (nowMs - wiredAt) / 1000;
+        if (wiredAge < 0) {
+            derived.put("wired_input_age", JSONObject.NULL);
+        } else {
+            derived.put("wired_input_age", wiredAge);
+        }
+        derived.put("wired_input_waiting",
+                lastWiredTelWaiting && chosen == null && usbOnline);
         derived.put("wired_input_stale", wiredStale);
         derived.put("wired_usb_online", usbOnline);
         putFinite(derived, "battery_power_w", battCurMa * battVolMv / 1e6);
@@ -1077,6 +1102,43 @@ public final class SnapshotCollector {
         if (last.isEmpty()) return false;
         if (last.contains("usb online: 0")) return true;
         return last.matches(".*real_type changed: \\d+ => 0.*");
+    }
+
+    /** 只保留最后一次 usb online / real_type changed 边界之后的日志段。 */
+    private String splitAfterLastWiredBoundary(String text) {
+        String[] lines = text.split("\n");
+        int last = -1;
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].contains("usb online:") || lines[i].contains("real_type changed:")) {
+                last = i;
+            }
+        }
+        if (last < 0) return text;
+        StringBuilder sb = new StringBuilder();
+        for (int i = last + 1; i < lines.length; i++) {
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(lines[i]);
+        }
+        return sb.toString();
+    }
+
+    private boolean hasWiredBoundary(String text) {
+        for (String line : text.split("\n")) {
+            if (line.contains("usb online:") || line.contains("real_type changed:")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** telemetry 唯一 key：(log_time, vbus_mv, ibus_ma)；相同则不刷新 at。 */
+    private boolean sameTelKey(JSONObject a, JSONObject b) {
+        if (b == null) return false;
+        return a.optString("log_time", "").equals(b.optString("log_time", ""))
+                && Double.compare(a.optDouble("vbus_mv", Double.NaN),
+                                  b.optDouble("vbus_mv", Double.NaN)) == 0
+                && Double.compare(a.optDouble("ibus_ma", Double.NaN),
+                                  b.optDouble("ibus_ma", Double.NaN)) == 0;
     }
 
     /** 无线/有线 CP 状态彻底解耦：power_good 只重置无线；usb online/real_type changed 只重置有线；
