@@ -122,9 +122,9 @@
   .kv .v small { color: var(--muted); margin-left: 4px; }
   .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #groups > .card:last-child { grid-column: 1 / -1; }
-  #groups > .card:last-child .tiles.batt { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  #groups > .card:last-child .tiles.batt .tile.wide { grid-column: span 2; }
+  .card.wide { grid-column: 1 / -1; }
+  .card.wide .tiles.batt { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .card.wide .tiles.batt .tile.wide { grid-column: span 2; }
   .tile {
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
     padding: 8px 10px; min-width: 0;
@@ -152,7 +152,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px; margin-bottom: 16px;
   }
-  #voteTopics > .card:first-child { grid-column: 1 / -1; }
   #liveSessions { grid-template-columns: 1fr; }
   .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
   .chart-card h3 {
@@ -258,27 +257,31 @@
 
   @media (max-width: 900px) {
     body { padding: 14px 14px 36px; }
-    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid,
+    .kpis,
+    #groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #voteTopics,
+    #liveSessions,
     .charts { grid-template-columns: 1fr; }
-    #voteTopics > .card:first-child,
-    #groups > .card:last-child { grid-column: auto; }
-    #groups > .card:last-child .tiles.batt {
+    .card.wide .tiles.batt {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    #groups > .card:last-child .tiles.batt .tile.wide {
+    .card.wide .tiles.batt .tile.wide {
       grid-column: 1 / -1;
     }
   }
 
   @media (max-width: 560px) {
     body { padding: 12px 10px 36px; }
-    .kpis { grid-template-columns: 1fr; }
     .tiles,
     .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .card { padding: 12px 10px; }
     table { display: block; overflow-x: auto; }
     canvas { height: 100px; }
+  }
+
+  @media (max-width: 320px) {
+    .kpis,
+    .grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -613,7 +616,7 @@ function buildGroups(d) {
       ? CHIP_FACTS.map(f =>
           `<div class="tile"><div class="k">${esc(f[0])}</div><div class="v">${esc(f[1])}</div></div>`).join("")
       : "";
-    return `<div class="card"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
+    return `<div class="card${name === "芯片与系统" ? " wide" : ""}"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
       `<div class="tiles">${tiles}${extra}</div></div>`;
   });
 
@@ -644,7 +647,7 @@ function buildGroups(d) {
     return `<div class="tile${wide ? " wide" : ""}"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
       `<div class="v" data-batt="${key}">${v}</div></div>`;
   }).join("");
-  cards.push(`<div class="card"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
+  cards.push(`<div class="card wide"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
     `<div class="tiles batt">${battRows}</div></div>`);
   $("groups").innerHTML = cards.join("");
 }
@@ -899,7 +902,7 @@ function renderVoters(d) {
     summary.push(`<span class="chip">电池温度<b>${fmt(d.derived.temp_c, 1)}</b><small>°C</small></span>`);
   }
   const summaryCard = summary.length
-    ? `<div class="card"><h2>总仲裁结果<span class="tag">汇总</span></h2>` +
+    ? `<div class="card wide"><h2>总仲裁结果<span class="tag">汇总</span></h2>` +
       `<div class="chips" style="justify-content:flex-start">${summary.join("")}</div></div>`
     : "";
 
