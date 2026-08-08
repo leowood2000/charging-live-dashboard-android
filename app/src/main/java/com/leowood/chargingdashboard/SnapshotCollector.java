@@ -206,7 +206,7 @@ public final class SnapshotCollector {
         if (meta == null) meta = new JSONObject();
         meta.put("interval", 3)
                 .put("fast_interval", 3)
-                .put("logs_interval", 20)
+                .put("logs_interval", 10)
                 .put("logs_updated_at", lastLogsUpdatedAt)
                 .put("logs_stale", logsStale)
                 .put("adb", "root-direct");
@@ -401,7 +401,7 @@ public final class SnapshotCollector {
                 .put("meta", new JSONObject()
                         .put("interval", 3)
                         .put("fast_interval", 3)
-                        .put("logs_interval", 20)
+                        .put("logs_interval", 10)
                         .put("logs_updated_at", lastLogsUpdatedAt)
                         .put("logs_stale", logsStale)
                         .put("adb", "root-direct"));

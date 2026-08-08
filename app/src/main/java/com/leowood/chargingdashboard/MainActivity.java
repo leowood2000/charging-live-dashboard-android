@@ -60,7 +60,7 @@ public class MainActivity extends Activity {
                 if (webView != null) webView.evaluateJavascript(
                         "window.__onSnapshot && window.__onSnapshot();", null);
             });
-        }, 2, 20, TimeUnit.SECONDS);
+        }, 2, 10, TimeUnit.SECONDS);
     }
 
     @Override
