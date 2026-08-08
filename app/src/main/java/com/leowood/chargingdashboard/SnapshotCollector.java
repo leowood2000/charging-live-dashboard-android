@@ -167,12 +167,23 @@ public final class SnapshotCollector {
                     if (qcm != null) lastQuickCurMax = qcm;
                     Integer bf = parseBuckFcc(sessionLog);
                     if (bf != null) lastBuckFcc = bf;
-                    Integer cp = parseCpMode(sessionLog);
-                    if (cp != null) lastCpMode = cp;
-                    Integer cw = parseCpWorkMode(sessionLog);
-                    if (cw != null) lastCpWorkMode = cw;
-                    JSONObject dec = parseQuickCurDecision(sessionLog);
-                    if (dec != null) lastCurDecision = dec;
+                    JSONObject cpState = parseSessionCpState(sessionLog);
+                    if (cpState.optBoolean("boundary_seen", false)) {
+                        // 窗口内有会话切换：以本次解析为准，没有新行就清空旧状态
+                        lastCpMode = cpState.isNull("cp_mode") ? null : cpState.getInt("cp_mode");
+                        lastCpWorkMode = cpState.isNull("cp_work_mode")
+                                ? null : cpState.getInt("cp_work_mode");
+                        lastCurDecision = cpState.isNull("decision")
+                                ? null : cpState.getJSONObject("decision");
+                    } else {
+                        if (!cpState.isNull("cp_mode")) lastCpMode = cpState.getInt("cp_mode");
+                        if (!cpState.isNull("cp_work_mode")) {
+                            lastCpWorkMode = cpState.getInt("cp_work_mode");
+                        }
+                        if (!cpState.isNull("decision")) {
+                            lastCurDecision = cpState.getJSONObject("decision");
+                        }
+                    }
                 }
             }
             // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
@@ -809,6 +820,58 @@ public final class SnapshotCollector {
             }
         }
         return result;
+    }
+
+    /** 按会话解析 CP 状态：遇到 power_good_on/off 重置，只保留当前会话内的值。 */
+    private JSONObject parseSessionCpState(String text) throws JSONException {
+        Integer cpMode = null;
+        Integer cpWorkMode = null;
+        JSONObject decision = null;
+        JSONObject inputs = null;
+        boolean boundarySeen = false;
+        for (String line : text.split("\n")) {
+            if (line.contains("power_good_on") || line.contains("power_good_off")) {
+                boundarySeen = true;
+                cpMode = null;
+                cpWorkMode = null;
+                decision = null;
+                inputs = null;
+                continue;
+            }
+            Matcher m = CP_MODE_RE.matcher(line);
+            if (m.find()) {
+                cpMode = Integer.parseInt(m.group(1));
+                continue;
+            }
+            m = CP_WORK_MODE_RE.matcher(line);
+            if (m.find()) {
+                cpWorkMode = Integer.parseInt(m.group(1));
+                continue;
+            }
+            m = CUR_DECISION_IN_RE.matcher(line);
+            if (m.find()) {
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                inputs = new JSONObject()
+                        .put("channel_cur", Integer.parseInt(m.group(1)))
+                        .put("temp_max_cur", Integer.parseInt(m.group(2)))
+                        .put("tx_adapter_max", Integer.parseInt(m.group(3)))
+                        .put("sw_qc_ichg", Integer.parseInt(m.group(4)))
+                        .put("sw_thermal_ichg", Integer.parseInt(m.group(5)))
+                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
+                        .put("at", System.currentTimeMillis());
+                continue;
+            }
+            Matcher m2 = CUR_DECISION_FINAL_RE.matcher(line);
+            if (m2.find() && inputs != null) {
+                decision = new JSONObject(inputs.toString());
+                decision.put("final", Integer.parseInt(m2.group(1)));
+            }
+        }
+        return new JSONObject()
+                .put("boundary_seen", boundarySeen)
+                .put("cp_mode", cpMode == null ? JSONObject.NULL : cpMode)
+                .put("cp_work_mode", cpWorkMode == null ? JSONObject.NULL : cpWorkMode)
+                .put("decision", decision == null ? JSONObject.NULL : decision);
     }
 
     private static final java.util.Map<String, String> THERMAL_SCENES = new java.util.HashMap<>();
