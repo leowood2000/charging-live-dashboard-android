@@ -524,7 +524,8 @@ public final class SnapshotCollector {
             wiredAt = nowMs;
         }
         boolean wiredOnline = Double.isFinite(wiredVbusMv) && Double.isFinite(wiredIbusMa);
-        double wiredPower = wiredOnline ? wiredVbusMv * wiredIbusMa / 1000.0 : Double.NaN;
+        // mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
+        double wiredPower = wiredOnline ? wiredVbusMv * wiredIbusMa / 1e6 : Double.NaN;
 
         // 当前输入源抽象层：有线优先（避免旧无线残留值覆盖），无输入时为 none
         String inputSource;
