@@ -83,6 +83,9 @@ public final class SnapshotCollector {
     private volatile JSONObject lastWiredBuckTel = null;
     /** 新会话/协议变化后尚无策略遥测：页面回退 USB uevent 并标记“等待策略遥测”。 */
     private volatile boolean lastWiredTelWaiting = false;
+    /** 无线控制模式（bpp drawload / epp_plus/QC）与 RX 输出电流上限。 */
+    private volatile String lastWlsMode = "unknown";
+    private volatile Integer lastRxIoutLimit = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private volatile boolean powerPathLogsStale = false;
@@ -179,7 +182,14 @@ public final class SnapshotCollector {
                     lastCpMode = null;
                     lastCpWorkMode = null;
                     lastCurDecision = null;
+                    lastWlsMode = "unknown";
+                    lastRxIoutLimit = null;
                 } else {
+                    JSONObject wm = parseWirelessMode(
+                            splitAfterLastWirelessAttach(sessionLog));
+                    lastWlsMode = wm.optString("mode", "unknown");
+                    lastRxIoutLimit = wm.isNull("rx_iout_limit")
+                            ? null : wm.getInt("rx_iout_limit");
                     WlsIcl icl = parseWlsIcl(sessionLog);
                     if (icl != null) {
                         lastWlsIcl = icl.value;
@@ -307,6 +317,9 @@ public final class SnapshotCollector {
                 buck.put("cp_ratio", lastCpWorkMode);
             }
             if (lastCurDecision != null) buck.put("cur_max_decision", lastCurDecision);
+            // 无线控制模式：BPP drawload 同域可比较；EPP+/QC 不同域不可比较
+            buck.put("wls_mode", lastWlsMode == null ? "unknown" : lastWlsMode);
+            if (lastRxIoutLimit != null) buck.put("rx_iout_limit", lastRxIoutLimit);
         }
         // 有线 CP 三态：cp / buck / unknown（本会话无 SC8581 模式日志则待确认）
         JSONObject derived = core.optJSONObject("derived");
@@ -419,7 +432,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|BPP drawload|rx_iout_limit|epp plus";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
@@ -1210,6 +1223,46 @@ public final class SnapshotCollector {
                                   b.optDouble("vbus_mv", Double.NaN)) == 0
                 && Double.compare(a.optDouble("ibus_ma", Double.NaN),
                                   b.optDouble("ibus_ma", Double.NaN)) == 0;
+    }
+
+    private static final Pattern RX_IOUT_LIMIT_RE =
+            Pattern.compile("rx_iout_limit:\\s*(\\d+)");
+
+    /** 只保留最后一次 wireless power_good_on 之后的日志段。 */
+    private String splitAfterLastWirelessAttach(String text) {
+        String[] lines = text.split("\n");
+        int last = -1;
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].contains("power_good_on")) last = i;
+        }
+        if (last < 0) return text;
+        StringBuilder sb = new StringBuilder();
+        for (int i = last + 1; i < lines.length; i++) {
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(lines[i]);
+        }
+        return sb.toString();
+    }
+
+    /** 无线控制模式：bpp（drawload 同域）/ epp_plus（wls_icl 与 iout 不同域）/ unknown。 */
+    private JSONObject parseWirelessMode(String text) throws JSONException {
+        String mode = "unknown";
+        Integer rxLimit = null;
+        boolean qcEnabled = false;
+        for (String line : text.split("\n")) {
+            if (line.contains("BPP drawload")) mode = "bpp";
+            if (line.contains("epp plus")) mode = "epp_plus";
+            Matcher m = RX_IOUT_LIMIT_RE.matcher(line);
+            // 函数名 ...op_get_rx_iout_limit:421 里的行号也会匹配，
+            // 必须取该行最后一次匹配（真正的 rx_iout_limit: 3800）
+            while (m.find()) rxLimit = Integer.parseInt(m.group(1));
+            if (line.contains("can quick charge!")) qcEnabled = true;
+        }
+        if (qcEnabled && "unknown".equals(mode)) mode = "epp_plus";
+        return new JSONObject()
+                .put("mode", mode)
+                .put("rx_iout_limit", rxLimit == null ? JSONObject.NULL : rxLimit)
+                .put("qc_enabled", qcEnabled);
     }
 
     /** 无线/有线 CP 状态彻底解耦：power_good 只重置无线；usb online/real_type changed 只重置有线；
