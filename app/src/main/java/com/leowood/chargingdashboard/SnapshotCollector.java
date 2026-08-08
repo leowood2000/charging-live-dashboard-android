@@ -63,6 +63,8 @@ public final class SnapshotCollector {
     private volatile Integer lastQuickCurMax = null;
     /** wireless loop 行里的 buck_fcc（电池侧 FCC 上限），cur_max 缺失时的回退。 */
     private volatile Integer lastBuckFcc = null;
+    /** sc8581 电荷泵工作模式：>0 表示 CP 路径生效（此时 buck 输入限流不约束实际电流）。 */
+    private volatile Integer lastCpMode = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private String lastError = "";
@@ -147,6 +149,7 @@ public final class SnapshotCollector {
                     lastWlsIclLogTime = null;
                     lastQuickCurMax = null;
                     lastBuckFcc = null;
+                    lastCpMode = null;
                 } else {
                     WlsIcl icl = parseWlsIcl(sessionLog);
                     if (icl != null) {
@@ -158,6 +161,8 @@ public final class SnapshotCollector {
                     if (qcm != null) lastQuickCurMax = qcm;
                     Integer bf = parseBuckFcc(sessionLog);
                     if (bf != null) lastBuckFcc = bf;
+                    Integer cp = parseCpMode(sessionLog);
+                    if (cp != null) lastCpMode = cp;
                 }
             }
             // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
@@ -188,6 +193,7 @@ public final class SnapshotCollector {
                         .put("actual_limit_source",
                                 lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
             }
+            buck.put("cp_active", lastCpMode != null && lastCpMode > 0);
         }
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
         JSONObject meta = core.optJSONObject("meta");
@@ -281,7 +287,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat|sc8581_set_operation_mode";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
@@ -734,6 +740,17 @@ public final class SnapshotCollector {
     private Integer parseBuckFcc(String text) {
         Integer last = null;
         Matcher m = BUCK_FCC_RE.matcher(text);
+        while (m.find()) last = Integer.parseInt(m.group(1));
+        return last;
+    }
+
+    private static final Pattern CP_MODE_RE =
+            Pattern.compile("set operation mode (\\d+)");
+
+    /** 取最新 sc8581 电荷泵工作模式（0=关，>0=CP 路径生效）。 */
+    private Integer parseCpMode(String text) {
+        Integer last = null;
+        Matcher m = CP_MODE_RE.matcher(text);
         while (m.find()) last = Integer.parseInt(m.group(1));
         return last;
     }
