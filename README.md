@@ -32,7 +32,7 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - “当前功率路径”chip 附带电荷泵转换比（由 quick wireless work_mode 映射：1:1 bypass / 2:1 div2 / 4:1 div4）
 - 未充电（battery STATUS ≠ Charging）时隐藏全部投票/仲裁卡片，仅保留生效场景、虚拟温度、电池温度与 JEITA 静态参数，避免“没充电还挂着一堆票”
 - 电荷泵路径生效时，首页隐藏 `wireless_buck_input`，折叠到“仲裁详情 · 未生效”卡（保留名义仲裁与投票，标注退出 CP 后将使用该限流）
-- CP 路径生效时，总仲裁“无线输入限流”一律显示“实际约束限流”（quick_wireless cur_max / buck_fcc），不再显示 buck 输入侧的名义 250mA 等值
+- 总仲裁“无线输入限流”显示输入侧实际限流（如 soc_limit 250mA）；仅当实际输入电流明显违反该限流时才切换为“实际约束限流”（cur_max / buck_fcc）
 - ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
 - 总仲裁只显示实际结果：无线输入限流在仲裁值未生效时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless cur_max / buck_fcc），不再误标为无线输入电流；保留生效场景 / 虚拟温度 / 电池温度
 - 实际下发 ICL / 实时 iout / 限流未生效细节移到 wireless_buck_input 详情卡，并按物理功率比（icl × vrect / vbat）判定
