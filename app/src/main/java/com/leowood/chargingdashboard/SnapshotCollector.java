@@ -69,10 +69,12 @@ public final class SnapshotCollector {
     private volatile Integer lastCpWorkMode = null;
     /** select_max_ibat 完整决策（输入 + cur_max Final + 日志时间）。 */
     private volatile JSONObject lastCurDecision = null;
-    /** 有线 CP 状态：会话内最后一次 operation mode / work_mode/ratio / cur_work_cp 证据。 */
-    private volatile Integer lastWiredCpMode = null;
+    /** 有线功率路径状态：cp / buck / unknown（时间顺序 + CP 证据优先）。 */
+    private volatile String lastWiredState = "unknown";
     private volatile Integer lastWiredCpRatio = null;
     private volatile boolean lastWiredCurCp = false;
+    /** 有线 Buck 证据：buckchg 策略活动（无 CP 证据时据此判 Buck）。 */
+    private volatile boolean lastWiredBuck = false;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private String lastError = "";
@@ -189,18 +191,23 @@ public final class SnapshotCollector {
                     }
                     // 有线 track：usb online / real_type changed 边界
                     if (cpState.optBoolean("d_boundary", false)) {
-                        lastWiredCpMode = cpState.isNull("d_mode") ? null : cpState.getInt("d_mode");
+                        lastWiredState = cpState.optString("d_state", "unknown");
                         lastWiredCpRatio = cpState.isNull("d_ratio") ? null : cpState.getInt("d_ratio");
                         lastWiredCurCp = cpState.optBoolean("d_cur_cp", false);
+                        lastWiredBuck = cpState.optBoolean("d_buck", false);
                     } else {
-                        if (!cpState.isNull("d_mode")) {
-                            lastWiredCpMode = cpState.getInt("d_mode");
+                        String ds = cpState.optString("d_state", "unknown");
+                        if (!"unknown".equals(ds)) {
+                            lastWiredState = ds;
                         }
                         if (!cpState.isNull("d_ratio")) {
                             lastWiredCpRatio = cpState.getInt("d_ratio");
                         }
                         if (cpState.optBoolean("d_cur_cp", false)) {
                             lastWiredCurCp = true;
+                        }
+                        if (cpState.optBoolean("d_buck", false)) {
+                            lastWiredBuck = true;
                         }
                     }
                 }
@@ -251,14 +258,7 @@ public final class SnapshotCollector {
             derived = new JSONObject();
             core.put("derived", derived);
         }
-        String wstate;
-        if (lastWiredCpMode != null) {
-            wstate = lastWiredCpMode > 0 ? "cp" : "buck";
-        } else if (lastWiredCurCp) {
-            wstate = "cp";
-        } else {
-            wstate = "unknown";
-        }
+        String wstate = lastWiredState;
         derived.put("wired_cp", new JSONObject()
                 .put("state", wstate)
                 .put("ratio", "cp".equals(wstate) && lastWiredCpRatio != null
@@ -357,7 +357,7 @@ public final class SnapshotCollector {
     private String readSessionLogs() {
         String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
         if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat|sc8581_set_operation_mode|mca_wireless_quick_charge_select_cur_work_mode|usb online|real_type changed|mca_quick_charge_update_work_mode_para|strategy_quickchg_map_ibus_to_fsw|mca_quick_charge_select_max_ibat|mca_quick_charge_select_cur_work_mode";
+        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|mca_wireless_quick_charge_select_max_ibat|sc8581_set_operation_mode|mca_wireless_quick_charge_select_cur_work_mode|usb online|real_type changed|mca_quick_charge_update_work_mode_para|strategy_quickchg_map_ibus_to_fsw|mca_quick_charge_select_max_ibat|mca_quick_charge_select_cur_work_mode|mca_strategy_buckchg|strategy_buckchg";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
@@ -885,11 +885,16 @@ public final class SnapshotCollector {
         boolean wBoundary = false;
         boolean wCtx = false;
         Integer dMode = null;
+        int dModeSeq = -1;
         Integer dRatio = null;
         boolean dCurCp = false;
+        int dCurCpSeq = -1;
+        boolean dBuck = false;
         boolean dBoundary = false;
         boolean dCtx = false;
+        int seq = 0;
         for (String line : text.split("\n")) {
+            seq++;
             if (line.contains("power_good_on") || line.contains("power_good_off")) {
                 wBoundary = true;
                 wMode = null;
@@ -903,8 +908,11 @@ public final class SnapshotCollector {
                     || line.contains("real_type changed:")) {
                 dBoundary = true;
                 dMode = null;
+                dModeSeq = -1;
                 dRatio = null;
                 dCurCp = false;
+                dCurCpSeq = -1;
+                dBuck = false;
                 dCtx = false;
                 continue;
             }
@@ -916,11 +924,18 @@ public final class SnapshotCollector {
                 dCtx = true;
                 wCtx = false;
             }
+            // 有线 Buck 证据：buckchg 策略活动（无 CP 证据时据此判 Buck）
+            if (line.contains("mca_strategy_buckchg") || line.contains("strategy_buckchg")) {
+                dBuck = true;
+            }
             Matcher m = CP_MODE_RE.matcher(line);
             if (m.find()) {
                 int n = Integer.parseInt(m.group(1));
                 if (wCtx) wMode = n;
-                if (dCtx) dMode = n;
+                if (dCtx) {
+                    dMode = n;
+                    dModeSeq = seq;
+                }
                 continue;
             }
             m = WIRELESS_WORK_MODE_RE.matcher(line);
@@ -941,6 +956,7 @@ public final class SnapshotCollector {
             if (line.contains("mca_quick_charge_select_max_ibat:")
                     && line.contains("cur_work_cp")) {
                 dCurCp = true;
+                dCurCpSeq = seq;
                 continue;
             }
             if (!line.contains("mca_wireless_quick_charge_select_max_ibat:")) {
@@ -965,14 +981,32 @@ public final class SnapshotCollector {
                 wDecision.put("final", Integer.parseInt(m2.group(1)));
             }
         }
+        // 有线最终状态：时间顺序 + CP 证据优先
+        String dState;
+        if (dMode != null) {
+            if (dMode > 0) {
+                dState = "cp";
+            } else if (dCurCp && dCurCpSeq > dModeSeq) {
+                dState = "cp";   // mode=0 之后又出现 cur_work_cp → CP 重新激活
+            } else {
+                dState = "buck";
+            }
+        } else if (dCurCp) {
+            dState = "cp";
+        } else if (dBuck) {
+            dState = "buck";
+        } else {
+            dState = "unknown";
+        }
         return new JSONObject()
                 .put("w_mode", wMode == null ? JSONObject.NULL : wMode)
                 .put("w_work", wWork == null ? JSONObject.NULL : wWork)
                 .put("w_decision", wDecision == null ? JSONObject.NULL : wDecision)
                 .put("w_boundary", wBoundary)
-                .put("d_mode", dMode == null ? JSONObject.NULL : dMode)
+                .put("d_state", dState)
                 .put("d_ratio", dRatio == null ? JSONObject.NULL : dRatio)
                 .put("d_cur_cp", dCurCp)
+                .put("d_buck", dBuck)
                 .put("d_boundary", dBoundary);
     }
 
