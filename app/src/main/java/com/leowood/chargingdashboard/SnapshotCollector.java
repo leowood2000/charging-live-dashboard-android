@@ -60,6 +60,11 @@ public final class SnapshotCollector {
     private volatile Integer lastWlsIcl = null;
     private volatile Long lastWlsIclAt = null;
     private volatile String lastWlsIclLogTime = null;
+    private volatile Long lastWlsIclMs = null;
+    /** 最近一次无线 work_mode 变化行的归一化日志毫秒（跨文件单调，用于 ICL/effective 时效判定）。 */
+    private volatile Long lastWlsWorkModeMs = null;
+    /** 当前读取的 mca 日志文件名（mca_log_MMDD_HHMM.log），用于日志时间归一化。 */
+    private volatile String lastLogFname = "";
     private volatile Integer lastWlsChgEn = null;
     /** quick wireless 最终电池电流目标 cur_max:[Final]，CP 快充路径下真正约束电流的值。 */
     private volatile Integer lastQuickCurMax = null;
@@ -183,12 +188,14 @@ public final class SnapshotCollector {
                     lastWlsIcl = null;
                     lastWlsIclAt = null;
                     lastWlsIclLogTime = null;
+                    lastWlsIclMs = null;
                     lastWlsIclKey = null;
                     lastWlsChgEn = null;
                     lastQuickCurMax = null;
                     lastBuckFcc = null;
                     lastCpMode = null;
                     lastCpWorkMode = null;
+                    lastWlsWorkModeMs = null;
                     lastCurDecision = null;
                     lastCurDecisionKey = null;
                     lastWlsMode = "unknown";
@@ -209,6 +216,7 @@ public final class SnapshotCollector {
                             lastWlsIcl = icl.value;
                             lastWlsIclAt = icl.at;
                             lastWlsIclLogTime = icl.logTime;
+                            lastWlsIclMs = icl.ms;
                             lastWlsChgEn = icl.chgEn;
                         }
                     }
@@ -257,6 +265,8 @@ public final class SnapshotCollector {
                 if (cpState.optBoolean("w_boundary", false)) {
                     lastCpMode = cpState.isNull("w_mode") ? null : cpState.getInt("w_mode");
                     lastCpWorkMode = cpState.isNull("w_work") ? null : cpState.getInt("w_work");
+                    lastWlsWorkModeMs = cpState.isNull("w_work_ms")
+                            ? null : cpState.getLong("w_work_ms");
                     lastCurDecision = cpState.isNull("w_decision")
                             ? null : cpState.getJSONObject("w_decision");
                     lastCurDecisionKey = null;
@@ -264,6 +274,9 @@ public final class SnapshotCollector {
                     if (!cpState.isNull("w_mode")) lastCpMode = cpState.getInt("w_mode");
                     if (!cpState.isNull("w_work")) {
                         lastCpWorkMode = cpState.getInt("w_work");
+                        if (!cpState.isNull("w_work_ms")) {
+                            lastWlsWorkModeMs = cpState.getLong("w_work_ms");
+                        }
                     }
                     if (!cpState.isNull("w_decision")) {
                         JSONObject wd = cpState.getJSONObject("w_decision");
@@ -340,7 +353,8 @@ public final class SnapshotCollector {
             JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
             if (buck != null) buck.put("icl", lastWlsIcl)
                     .put("icl_time", lastWlsIclLogTime == null ? "" : lastWlsIclLogTime)
-                    .put("icl_at", lastWlsIclAt == null ? 0L : lastWlsIclAt.longValue());
+                    .put("icl_at", lastWlsIclAt == null ? 0L : lastWlsIclAt.longValue())
+                    .put("icl_ms", lastWlsIclMs == null ? 0L : lastWlsIclMs.longValue());
             if (buck != null && lastWlsChgEn != null) buck.put("chg_en", lastWlsChgEn);
         }
         JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
@@ -360,6 +374,9 @@ public final class SnapshotCollector {
             buck.put("cp_active", lastCpMode != null && lastCpMode > 0);
             if (lastCpMode != null && lastCpMode > 0 && lastCpWorkMode != null) {
                 buck.put("cp_ratio", lastCpWorkMode);
+            }
+            if (lastWlsWorkModeMs != null) {
+                buck.put("wls_work_mode_ms", lastWlsWorkModeMs.longValue());
             }
             if (lastCurDecision != null) buck.put("cur_max_decision", lastCurDecision);
             // 无线控制模式：BPP drawload 同域可比较；EPP+/QC 不同域不可比较
@@ -470,6 +487,7 @@ public final class SnapshotCollector {
     private String readVoteLogs() {
         String fname = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 1", 10).trim();
         if (!fname.matches("[A-Za-z0-9_.\\-]+")) return "";
+        lastLogFname = fname;
         return RootShell.exec("tail -c 2097152 " + MCA_LOG_DIR + "/" + fname
                 + " | grep -a -E 'mca_vote'", 15);
     }
@@ -480,6 +498,9 @@ public final class SnapshotCollector {
         String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|BPP drawload|rx_iout_limit|epp plus|EPP\\+|send_vout_range_request|set adapter voltage";
         StringBuilder script = new StringBuilder();
         String[] logFiles = files.split("\n");
+        if (logFiles.length > 0 && logFiles[0].matches("[A-Za-z0-9_.\\-]+")) {
+            lastLogFname = logFiles[0];
+        }
         // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
         for (int i = logFiles.length - 1; i >= 0; i--) {
             String f = logFiles[i].trim();
@@ -496,6 +517,7 @@ public final class SnapshotCollector {
     private String readPowerPathLogs() {
         String fname = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 1", 10).trim();
         if (!fname.matches("[A-Za-z0-9_.\\-]+")) return "";
+        lastLogFname = fname;
         String pattern = "power_good|usb online|real_type changed|"
                 + "sc8581_set_operation_mode|"
                 + "mca_quick_charge_update_work_mode_para|"
@@ -775,6 +797,30 @@ public final class SnapshotCollector {
         return o;
     }
 
+    private static final Pattern LOG_FILE_RE =
+            Pattern.compile("mca_log_(\\d{2})(\\d{2})_(\\d{2})(\\d{2})\\.log");
+
+    /** 日志行时间（已 shift 为本地）→ 归一化绝对毫秒：文件名日期 + 行内时刻，跨文件单调。 */
+    private long absLogMs(String fname, String hms) {
+        java.time.LocalDate d = java.time.LocalDate.now();
+        Matcher fm = LOG_FILE_RE.matcher(fname == null ? "" : fname);
+        if (fm.find()) {
+            d = java.time.LocalDate.of(d.getYear(),
+                    Integer.parseInt(fm.group(1)), Integer.parseInt(fm.group(2)));
+        }
+        long base = d.atStartOfDay(java.time.ZoneId.systemDefault())
+                .toInstant().toEpochMilli();
+        String[] p = hms.split(":");
+        if (p.length < 4) return base;
+        try {
+            return base + Long.parseLong(p[0]) * 3600000L
+                    + Long.parseLong(p[1]) * 60000L
+                    + Long.parseLong(p[2]) * 1000L + Long.parseLong(p[3]);
+        } catch (NumberFormatException e) {
+            return base;
+        }
+    }
+
     /** sysfs 节点数值：非法/空返回 NaN。 */
     private static double nodeNum(JSONObject node) {
         if (node == null || !node.optBoolean("ok", false)) return Double.NaN;
@@ -895,10 +941,11 @@ public final class SnapshotCollector {
             if (m.find()) {
                 Matcher tm = VOTE_TIME_RE.matcher(line);
                 String time = tm.find() ? shiftLogTime(tm.group(1)) : "";
+                long rms = time.isEmpty() ? 0L : absLogMs(lastLogFname, time);
                 resultsByTopic.put(m.group(1), new JSONObject()
                         .put("topic", m.group(1)).put("value", Integer.parseInt(m.group(2)))
                         .put("client", m.group(3)).put("idx", Integer.parseInt(m.group(4)))
-                        .put("time", time));
+                        .put("time", time).put("r_ms", rms));
                 continue;
             }
             m = VOTE_HEADER_RE.matcher(line);
@@ -1058,12 +1105,14 @@ public final class SnapshotCollector {
         final int chgEn;
         final long at;
         final String logTime;
+        final long ms;
 
-        WlsIcl(int value, int chgEn, long at, String logTime) {
+        WlsIcl(int value, int chgEn, long at, String logTime, long ms) {
             this.value = value;
             this.chgEn = chgEn;
             this.at = at;
             this.logTime = logTime;
+            this.ms = ms;
         }
     }
 
@@ -1087,10 +1136,12 @@ public final class SnapshotCollector {
             Matcher m = WLS_ICL_RE.matcher(line);
             if (!m.find()) continue;
             Matcher tm = VOTE_TIME_RE.matcher(line);
-            String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
+            String raw = tm.find() ? tm.group(1) : "";
+            String logTime = raw.isEmpty() ? "" : shiftLogTime(raw);
+            long ms = raw.isEmpty() ? 0L : absLogMs(lastLogFname, logTime);
             last = new WlsIcl(Integer.parseInt(m.group(1)),
                     Integer.parseInt(m.group(2)),
-                    System.currentTimeMillis(), logTime);
+                    System.currentTimeMillis(), logTime, ms);
         }
         return last;
     }
@@ -1326,6 +1377,7 @@ public final class SnapshotCollector {
     private JSONObject parseSessionCpState(String text) throws JSONException {
         Integer wMode = null;
         Integer wWork = null;
+        Long wWorkMs = null;
         JSONObject wDecision = null;
         JSONObject wInputs = null;
         boolean wBoundary = false;
@@ -1347,6 +1399,7 @@ public final class SnapshotCollector {
                 wBoundary = true;
                 wMode = null;
                 wWork = null;
+                wWorkMs = null;
                 wDecision = null;
                 wInputs = null;
                 wCtx = false;
@@ -1391,6 +1444,10 @@ public final class SnapshotCollector {
             m = WIRELESS_WORK_MODE_RE.matcher(line);
             if (m.find()) {
                 wWork = Integer.parseInt(m.group(1));
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                String raw = tm.find() ? tm.group(1) : "";
+                wWorkMs = raw.isEmpty() ? null
+                        : Long.valueOf(absLogMs(lastLogFname, shiftLogTime(raw)));
                 continue;
             }
             m = WIRED_WORK_MODE_RE.matcher(line);
@@ -1476,6 +1533,7 @@ public final class SnapshotCollector {
         return new JSONObject()
                 .put("w_mode", wMode == null ? JSONObject.NULL : wMode)
                 .put("w_work", wWork == null ? JSONObject.NULL : wWork)
+                .put("w_work_ms", wWorkMs == null ? JSONObject.NULL : wWorkMs)
                 .put("w_decision", wDecision == null ? JSONObject.NULL : wDecision)
                 .put("w_boundary", wBoundary)
                 .put("d_state", dState)
