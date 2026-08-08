@@ -67,6 +67,8 @@ public final class SnapshotCollector {
     private volatile Integer lastCpMode = null;
     /** quick wireless 电荷泵分压比 work_mode（1/2/4 → 1:1/2:1/4:1）。 */
     private volatile Integer lastCpWorkMode = null;
+    /** select_max_ibat 完整决策（输入 + cur_max Final + 日志时间）。 */
+    private volatile JSONObject lastCurDecision = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private String lastError = "";
@@ -153,6 +155,7 @@ public final class SnapshotCollector {
                     lastBuckFcc = null;
                     lastCpMode = null;
                     lastCpWorkMode = null;
+                    lastCurDecision = null;
                 } else {
                     WlsIcl icl = parseWlsIcl(sessionLog);
                     if (icl != null) {
@@ -168,6 +171,8 @@ public final class SnapshotCollector {
                     if (cp != null) lastCpMode = cp;
                     Integer cw = parseCpWorkMode(sessionLog);
                     if (cw != null) lastCpWorkMode = cw;
+                    JSONObject dec = parseQuickCurDecision(sessionLog);
+                    if (dec != null) lastCurDecision = dec;
                 }
             }
             // 只有命令失败（空输出）才算 stale；正常但暂无数据不算失败
@@ -200,6 +205,7 @@ public final class SnapshotCollector {
             }
             buck.put("cp_active", lastCpMode != null && lastCpMode > 0);
             if (lastCpWorkMode != null) buck.put("cp_ratio", lastCpWorkMode);
+            if (lastCurDecision != null) buck.put("cur_max_decision", lastCurDecision);
         }
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
         JSONObject meta = core.optJSONObject("meta");
@@ -770,6 +776,39 @@ public final class SnapshotCollector {
         Matcher m = CP_WORK_MODE_RE.matcher(text);
         while (m.find()) last = Integer.parseInt(m.group(1));
         return last;
+    }
+
+    private static final Pattern CUR_DECISION_IN_RE = Pattern.compile(
+            "select_max_ibat:445 \\[channel_cur:(\\d+)\\], \\[temp_max_cur:(\\d+)\\], " +
+            "\\[tx_adapter_max:(\\d+)\\], \\[sw_qc_ichg:(\\d+)\\],\\[sw_thermal_ichg:(\\d+)\\]");
+    private static final Pattern CUR_DECISION_FINAL_RE = Pattern.compile(
+            "select_max_ibat:446 cur_max:\\[Final\\]: (\\d+)");
+
+    /** 取最新 select_max_ibat 完整决策：输入项 + cur_max:[Final] + 日志时间。 */
+    private JSONObject parseQuickCurDecision(String text) throws JSONException {
+        JSONObject inputs = null;
+        JSONObject result = null;
+        for (String line : text.split("\n")) {
+            Matcher m = CUR_DECISION_IN_RE.matcher(line);
+            if (m.find()) {
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                inputs = new JSONObject()
+                        .put("channel_cur", Integer.parseInt(m.group(1)))
+                        .put("temp_max_cur", Integer.parseInt(m.group(2)))
+                        .put("tx_adapter_max", Integer.parseInt(m.group(3)))
+                        .put("sw_qc_ichg", Integer.parseInt(m.group(4)))
+                        .put("sw_thermal_ichg", Integer.parseInt(m.group(5)))
+                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
+                        .put("at", System.currentTimeMillis());
+                continue;
+            }
+            Matcher m2 = CUR_DECISION_FINAL_RE.matcher(line);
+            if (m2.find() && inputs != null) {
+                result = new JSONObject(inputs.toString());
+                result.put("final", Integer.parseInt(m2.group(1)));
+            }
+        }
+        return result;
     }
 
     private static final java.util.Map<String, String> THERMAL_SCENES = new java.util.HashMap<>();

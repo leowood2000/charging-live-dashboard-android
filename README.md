@@ -33,7 +33,8 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 未充电（battery STATUS ≠ Charging）时隐藏全部投票/仲裁卡片，仅保留生效场景、虚拟温度、电池温度与 JEITA 静态参数，避免“没充电还挂着一堆票”
 - 电荷泵路径生效时，首页隐藏 `wireless_buck_input`，折叠到“仲裁详情 · 未生效”卡（保留名义仲裁与投票，标注退出 CP 后将使用该限流）
 - 总仲裁“无线输入限流”优先显示驱动实际下发的 `wireless loop: icl`（证据链 soc_limit → effective → icl），仅在实际输入电流明显违反时标注“未生效”
-- 电池侧 cur_max / buck_fcc 单独显示为“电池侧充电上限”，与输入侧 ICL 分开展示，不再互相覆盖
+- 电池侧显示“电池侧算法上限”（quick wireless 最近一次 `cur_max:[Final]`，带年龄，超 30s 标“历史值/待刷新”）与“最新限制候选”（如 wireless_sw_thermal_ich 新值，等待 quick wireless 收敛），不与输入侧 ICL 混淆
+- 新增只读卡“Quick Wireless 电池电流决策”：展示 select_max_ibat 的五个输入（channel_cur / temp_max_cur / tx_adapter_max / sw_qc_ichg / sw_thermal_ichg，标注当前瓶颈）、`cur_max:[Final]` 与实际 ibat，明确标注“算法聚合 · 非 MCA votable”
 - ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
 - 总仲裁只显示实际结果：无线输入限流在仲裁值未生效时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless cur_max / buck_fcc），不再误标为无线输入电流；保留生效场景 / 虚拟温度 / 电池温度
 - 实际下发 ICL / 实时 iout / 限流未生效细节移到 wireless_buck_input 详情卡，并按物理功率比（icl × vrect / vbat）判定
