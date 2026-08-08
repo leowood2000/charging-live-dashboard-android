@@ -409,7 +409,8 @@ function fmt(v, digits = 0) {
 function srcText(s) {
   if (s === "quick_charge_regulation") return "quickchg regulation";
   if (s === "buckchg_telemetry") return "buckchg telemetry";
-  if (s === "usb_uevent") return "USB uevent（兜底）";
+  if (s === "usb_uevent") return "USB uevent";
+  if (s === "cp_ibus_total") return "CP ibus_total";
   return s || "-";
 }
 function inputSourceHint(d) {
@@ -542,9 +543,9 @@ function renderGroups(d) {
       }
       el.innerHTML = v;
     });
-    ["vbus", "ibus", "power", "src"].forEach(key => {
+    ["vbus", "ibus", "power", "src", "tel"].forEach(key => {
       const el = document.querySelector(`[data-wired="${key}"]`);
-      if (el) el.innerHTML = wiredTileValue(key, d);
+      if (el) el.innerHTML = key === "tel" ? wiredTelValue(d) : wiredTileValue(key, d);
     });
     const tagEl = $("wiredInputTag");
     if (tagEl) {
@@ -572,6 +573,14 @@ function wiredTileValue(key, d) {
   if (key === "vbus") return `<span>${fmt(v / 1000, 2)}<small>V</small></span>`;
   if (key === "ibus") return `<span>${fmt(v, 0)}<small>mA</small></span>`;
   return `<span>${fmt(v, 2)}<small>W</small></span>`;
+}
+
+function wiredTelValue(d) {
+  const tel = (d && d.derived) || {};
+  const ti = tel.wired_tel_ibus_ma;
+  if (!Number.isFinite(ti)) return `<span class="empty">--</span>`;
+  return `${fmt(ti, 0)}<small>mA</small>` +
+    (tel.wired_tel_stale ? '<span class="bad" style="margin-left:4px">陈旧</span>' : "");
 }
 
 function batteryConv(key, raw) {
@@ -633,6 +642,7 @@ function buildGroups(d) {
       `<div class="tiles"><div class="tile"><div class="k">有线输入电压<small>VBUS</small></div><div class="v" data-wired="vbus">${wiredTileValue("vbus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入电流<small>IBUS</small></div><div class="v" data-wired="ibus">${wiredTileValue("ibus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入功率<small>VBUS×IBUS</small></div><div class="v" data-wired="power">${wiredTileValue("power", d)}</div></div>` +
+      `<div class="tile wide"><div class="k">遥测校验<small>策略日志 ibus · ${esc(tel.wired_tel_source ? srcText(tel.wired_tel_source) : "-")}</small></div><div class="v" data-wired="tel">${wiredTelValue(d)}</div></div>` +
       `<div class="tile wide"><div class="k">测量来源<small>wired_input_source</small></div><div class="v" data-wired="src">${wiredTileValue("src", d)}</div></div></div></div>`);
   }
 
@@ -1051,9 +1061,10 @@ function renderCharts(d) {
   const srcEl = $("chart-input-source");
   if (srcEl) {
     const src = d.derived && d.derived.input_source;
+    const det = d.derived && d.derived.input_detail_source;
     const wiredWaiting = d.derived && d.derived.wired_input_waiting;
     srcEl.textContent = src === "wired"
-      ? "有线 · " + srcText(d.derived && d.derived.wired_input_source)
+      ? "有线 · " + srcText(det)
         + (wiredWaiting ? " · 等待策略遥测" : "")
       : src === "wireless" ? "无线 · wls_debug" : "";
   }
@@ -1061,7 +1072,7 @@ function renderCharts(d) {
     const latest = d.derived ? d.derived[s.id] : null;
     $(s.label).textContent = latest === null || latest === undefined ? "--" : fmt(s.scale ? s.scale(latest) : latest, s.scale ? 2 : 0);
     const vals = h.map(x => x[s.id] === null || x[s.id] === undefined ? null : (s.scale ? s.scale(x[s.id]) : x[s.id]));
-    const srcs = h.map(x => x.input_source || "none");
+    const srcs = h.map(x => x.input_detail_source || x.input_source || "none");
     drawLine($(s.cv), vals, s.color, s.label.replace("chart-", ""), srcs);
   });
 }

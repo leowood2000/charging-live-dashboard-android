@@ -125,6 +125,7 @@ public final class SnapshotCollector {
             JSONObject d = parsed.getJSONObject("derived");
             sample.put("t", System.currentTimeMillis() / 1000.0)
                     .put("input_source", d.opt("input_source"))
+                    .put("input_detail_source", d.opt("input_detail_source"))
                     .put("input_voltage_mv", d.opt("input_voltage_mv"))
                     .put("input_current_ma", d.opt("input_current_ma"))
                     .put("vout", d.opt("vout")).put("vrect", d.opt("vrect"))
@@ -539,27 +540,55 @@ public final class SnapshotCollector {
                     ? 12000 : 25000;
             wiredStale = age > limit;
         }
-        double wiredVbusMv = Double.NaN;
-        double wiredIbusMa = Double.NaN;
-        String wiredSource = null;
-        String wiredLogTime = "";
-        long wiredAt = 0L;
-        // 遥测已陈旧且 USB uevent 在线时，用每 3s 快采的 uevent 覆盖（仍保留 source）
+        // 策略日志遥测（校验数据）：regulation/buckchg 的 vbus/ibus，不再承担实时曲线
+        double telVbusMv = Double.NaN;
+        double telIbusMa = Double.NaN;
+        String telSource = null;
+        String telLogTime = "";
+        long telAt = 0L;
         if (chosen != null && !usbKnownOff && !(wiredStale && usbOnline)) {
-            wiredVbusMv = chosen.optDouble("vbus_mv", Double.NaN);
-            wiredIbusMa = chosen.optDouble("ibus_ma", Double.NaN);
-            wiredSource = chosen.optString("source", null);
-            wiredLogTime = chosen.optString("log_time", "");
-            wiredAt = chosen.optLong("at", 0L);
-        } else if (usbOnline) {
-            wiredVbusMv = usbVbusMv;
-            wiredIbusMa = usbIbusMa;
-            wiredSource = "usb_uevent";
-            wiredAt = nowMs;
+            telVbusMv = chosen.optDouble("vbus_mv", Double.NaN);
+            telIbusMa = chosen.optDouble("ibus_ma", Double.NaN);
+            telSource = chosen.optString("source", null);
+            telLogTime = chosen.optString("log_time", "");
+            telAt = chosen.optLong("at", 0L);
         }
-        boolean wiredOnline = Double.isFinite(wiredVbusMv) && Double.isFinite(wiredIbusMa);
+        // 实时测量主源（每 3s）：
+        //  有线 CP         → ibus_total（电荷泵总线电流，sysfs）
+        //  有线 Buck/unknown → usb uevent CURRENT_NOW
+        //  两者都不可用     → 回退策略日志遥测
+        double rtVbusMv = Double.NaN;
+        double rtIbusMa = Double.NaN;
+        String rtSource = null;
+        long rtAt = 0L;
+        if ("cp".equals(wstate)) {
+            double ibusTotal = nodeNum(nodesObj.optJSONObject("ibus_total"));
+            if (Double.isFinite(ibusTotal)) {
+                double vb = Double.isFinite(telVbusMv) ? telVbusMv : usbVbusMv;
+                if (Double.isFinite(vb) && Double.isFinite(ibusTotal)) {
+                    rtVbusMv = vb;
+                    rtIbusMa = ibusTotal;
+                    rtSource = "cp_ibus_total";
+                    rtAt = nowMs;
+                }
+            }
+        }
+        if (rtSource == null && usbOnline && Double.isFinite(usbVbusMv)
+                && Double.isFinite(usbIbusMa)) {
+            rtVbusMv = usbVbusMv;
+            rtIbusMa = usbIbusMa;
+            rtSource = "usb_uevent";
+            rtAt = nowMs;
+        }
+        if (rtSource == null && Double.isFinite(telVbusMv) && Double.isFinite(telIbusMa)) {
+            rtVbusMv = telVbusMv;
+            rtIbusMa = telIbusMa;
+            rtSource = telSource;
+            rtAt = telAt;
+        }
+        boolean wiredOnline = Double.isFinite(rtVbusMv) && Double.isFinite(rtIbusMa);
         // mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
-        double wiredPower = wiredOnline ? wiredVbusMv * wiredIbusMa / 1e6 : Double.NaN;
+        double wiredPower = wiredOnline ? rtVbusMv * rtIbusMa / 1e6 : Double.NaN;
 
         // 当前输入源抽象层：有线优先（避免旧无线残留值覆盖），无输入时为 none
         String inputSource;
@@ -568,8 +597,8 @@ public final class SnapshotCollector {
         double inputPower = Double.NaN;
         if (wiredOnline) {
             inputSource = "wired";
-            inputVolMv = wiredVbusMv;
-            inputCurMa = wiredIbusMa;
+            inputVolMv = rtVbusMv;
+            inputCurMa = rtIbusMa;
             inputPower = wiredPower;
         } else if (Double.isFinite(vout) && Double.isFinite(iout)
                 && (vout != 0 || iout != 0)) {
@@ -582,21 +611,24 @@ public final class SnapshotCollector {
         }
 
         derived.put("input_source", inputSource);
+        derived.put("input_detail_source",
+                "wired".equals(inputSource) ? (rtSource == null ? JSONObject.NULL : rtSource)
+                        : "wireless".equals(inputSource) ? "wls_debug" : JSONObject.NULL);
         putFinite(derived, "input_power_w", inputPower);
         putFinite(derived, "input_voltage_mv", inputVolMv);
         putFinite(derived, "input_current_ma", inputCurMa);
         derived.put("wired_online", wiredOnline);
-        putFinite(derived, "wired_vbus_mv", wiredVbusMv);
-        putFinite(derived, "wired_ibus_ma", wiredIbusMa);
+        putFinite(derived, "wired_vbus_mv", rtVbusMv);
+        putFinite(derived, "wired_ibus_ma", rtIbusMa);
         putFinite(derived, "wired_input_power_w", wiredPower);
-        derived.put("wired_input_source", wiredSource == null ? JSONObject.NULL : wiredSource);
-        if (wiredAt == 0L) {
+        derived.put("wired_input_source", rtSource == null ? JSONObject.NULL : rtSource);
+        if (rtAt == 0L) {
             derived.put("wired_input_at", JSONObject.NULL);
         } else {
-            derived.put("wired_input_at", wiredAt);
+            derived.put("wired_input_at", rtAt);
         }
-        derived.put("wired_input_log_time", wiredLogTime);
-        long wiredAge = wiredAt == 0L ? -1L : (nowMs - wiredAt) / 1000;
+        derived.put("wired_input_log_time", telLogTime);
+        long wiredAge = rtAt == 0L ? -1L : (nowMs - rtAt) / 1000;
         if (wiredAge < 0) {
             derived.put("wired_input_age", JSONObject.NULL);
         } else {
@@ -605,6 +637,13 @@ public final class SnapshotCollector {
         derived.put("wired_input_waiting",
                 lastWiredTelWaiting && chosen == null && usbOnline);
         derived.put("wired_input_stale", wiredStale);
+        // 校验遥测（策略日志）：与实时曲线源分层展示
+        derived.put("wired_tel_source", telSource == null ? JSONObject.NULL : telSource);
+        putFinite(derived, "wired_tel_vbus_mv", telVbusMv);
+        putFinite(derived, "wired_tel_ibus_ma", telIbusMa);
+        derived.put("wired_tel_stale", wiredStale);
+        derived.put("wired_tel_log_time", telLogTime);
+        derived.put("wired_tel_at", telAt == 0L ? JSONObject.NULL : telAt);
         derived.put("wired_usb_online", usbOnline);
         putFinite(derived, "battery_power_w", battCurMa * battVolMv / 1e6);
         putFinite(derived, "batt_current_ma", battCurMa);
@@ -676,6 +715,16 @@ public final class SnapshotCollector {
             o.put(k, line.substring(eq + 1).trim());
         }
         return o;
+    }
+
+    /** sysfs 节点数值：非法/空返回 NaN。 */
+    private static double nodeNum(JSONObject node) {
+        if (node == null || !node.optBoolean("ok", false)) return Double.NaN;
+        try {
+            return Double.parseDouble(node.optString("value").trim());
+        } catch (NumberFormatException e) {
+            return Double.NaN;
+        }
     }
 
     private static JSONObject parseWlsDebug(String text) throws JSONException {
