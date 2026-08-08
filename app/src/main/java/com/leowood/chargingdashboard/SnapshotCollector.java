@@ -74,6 +74,8 @@ public final class SnapshotCollector {
     private volatile String lastWiredState = "unknown";
     private volatile Integer lastWiredCpRatio = null;
     private volatile boolean lastWiredCurCp = false;
+    private volatile JSONObject lastWiredCurMax = null;
+    private volatile JSONObject lastWiredStageCurMax = null;
     /** 有线 Buck 证据：buckchg 策略活动（无 CP 证据时据此判 Buck）。 */
     private volatile boolean lastWiredBuck = false;
     /** 有线输入遥测缓存：CP regulation 与 Buck status 各一份，按 wired_cp.state 选择来源。 */
@@ -238,6 +240,10 @@ public final class SnapshotCollector {
                     lastWiredCpRatio = cpState.isNull("d_ratio") ? null : cpState.getInt("d_ratio");
                     lastWiredCurCp = cpState.optBoolean("d_cur_cp", false);
                     lastWiredBuck = cpState.optBoolean("d_buck", false);
+                    lastWiredCurMax = cpState.isNull("d_cur_max")
+                            ? null : cpState.getJSONObject("d_cur_max");
+                    lastWiredStageCurMax = cpState.isNull("d_stage_cur_max")
+                            ? null : cpState.getJSONObject("d_stage_cur_max");
                 } else {
                     String ds = cpState.optString("d_state", "unknown");
                     if (!"unknown".equals(ds)) {
@@ -251,6 +257,12 @@ public final class SnapshotCollector {
                     }
                     if (cpState.optBoolean("d_buck", false)) {
                         lastWiredBuck = true;
+                    }
+                    if (!cpState.isNull("d_cur_max")) {
+                        lastWiredCurMax = cpState.getJSONObject("d_cur_max");
+                    }
+                    if (!cpState.isNull("d_stage_cur_max")) {
+                        lastWiredStageCurMax = cpState.getJSONObject("d_stage_cur_max");
                     }
                 }
             }
@@ -307,7 +319,10 @@ public final class SnapshotCollector {
                 .put("ratio", "cp".equals(wstate) && lastWiredCpRatio != null
                         ? lastWiredCpRatio : JSONObject.NULL)
                 .put("active", "cp".equals(wstate))
-                .put("cur_work_cp", lastWiredCurCp));
+                .put("cur_work_cp", lastWiredCurCp)
+                .put("cur_max", lastWiredCurMax == null ? JSONObject.NULL : lastWiredCurMax)
+                .put("stage_cur_max", lastWiredStageCurMax == null
+                        ? JSONObject.NULL : lastWiredStageCurMax));
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
         JSONObject meta = core.optJSONObject("meta");
         if (meta == null) meta = new JSONObject();
@@ -431,7 +446,9 @@ public final class SnapshotCollector {
                 + "strategy_buckchg_update_charge_status|"
                 + "mca_quick_charge_regulation|"
                 + "mca_wireless_quick_charge_select_cur_work_mode|"
-                + "mca_wireless_quick_charge_select_max_ibat";
+                + "mca_wireless_quick_charge_select_max_ibat|"
+                + "mca_quick_charge_select_max_ibat:.*cur_stage .*cur_max .*cur_work_cp|"
+                + "mca_quick_charge_select_max_ibat:.*cur_max .*secure_cur .*channel_cur .*thermal_cur";
         return RootShell.exec("tail -c 1048576 " + MCA_LOG_DIR + "/" + fname
                 + " | grep -a -E '" + pattern + "' | tail -n 200; echo __PP_OK__", 15);
     }
@@ -1012,6 +1029,10 @@ public final class SnapshotCollector {
             "update_work_mode_para:.*work_mode: (\\d+)");
     private static final Pattern WIRED_RATIO_RE = Pattern.compile(
             "map_ibus_to_fsw:.*ratio: (\\d+)");
+    private static final Pattern WIRED_STAGE_CUR_MAX_RE = Pattern.compile(
+            "mca_quick_charge_select_max_ibat:.*cur_stage (\\d+) cur_max (\\d+) delta_cur (\\d+) cur_work_cp");
+    private static final Pattern WIRED_FINAL_CUR_MAX_RE = Pattern.compile(
+            "mca_quick_charge_select_max_ibat:.*cur_max (\\d+) secure_cur (\\d+) channel_cur (\\d+) thermal_cur (\\d+)");
     private static final Pattern WIRELESS_WORK_MODE_RE = Pattern.compile(
             "mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\\d+)");
 
@@ -1159,6 +1180,8 @@ public final class SnapshotCollector {
         boolean dBuck = false;
         boolean dBoundary = false;
         boolean dCtx = false;
+        JSONObject dCurMax = null;
+        JSONObject dStageCurMax = null;
         int seq = 0;
         for (String line : text.split("\n")) {
             seq++;
@@ -1181,6 +1204,8 @@ public final class SnapshotCollector {
                 dCurCpSeq = -1;
                 dBuck = false;
                 dCtx = false;
+                dCurMax = null;
+                dStageCurMax = null;
                 continue;
             }
             if (line.contains("mca_wireless_quick_charge_")) {
@@ -1218,6 +1243,31 @@ public final class SnapshotCollector {
             m = WIRED_RATIO_RE.matcher(line);
             if (m.find()) {
                 dRatio = Integer.parseInt(m.group(1));
+                continue;
+            }
+            Matcher mf = WIRED_FINAL_CUR_MAX_RE.matcher(line);
+            if (mf.find() && dCtx) {
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                dCurMax = new JSONObject()
+                        .put("cur_max", Integer.parseInt(mf.group(1)))
+                        .put("secure_cur", Integer.parseInt(mf.group(2)))
+                        .put("channel_cur", Integer.parseInt(mf.group(3)))
+                        .put("thermal_cur", Integer.parseInt(mf.group(4)))
+                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
+                        .put("at", System.currentTimeMillis());
+                continue;
+            }
+            Matcher ms = WIRED_STAGE_CUR_MAX_RE.matcher(line);
+            if (ms.find() && dCtx) {
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                dStageCurMax = new JSONObject()
+                        .put("stage", Integer.parseInt(ms.group(1)))
+                        .put("cur_max", Integer.parseInt(ms.group(2)))
+                        .put("delta", Integer.parseInt(ms.group(3)))
+                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
+                        .put("at", System.currentTimeMillis());
+                dCurCp = true;
+                dCurCpSeq = seq;
                 continue;
             }
             if (line.contains("mca_quick_charge_select_max_ibat:")
@@ -1274,6 +1324,8 @@ public final class SnapshotCollector {
                 .put("d_ratio", dRatio == null ? JSONObject.NULL : dRatio)
                 .put("d_cur_cp", dCurCp)
                 .put("d_buck", dBuck)
+                .put("d_cur_max", dCurMax == null ? JSONObject.NULL : dCurMax)
+                .put("d_stage_cur_max", dStageCurMax == null ? JSONObject.NULL : dStageCurMax)
                 .put("d_boundary", dBoundary);
     }
 

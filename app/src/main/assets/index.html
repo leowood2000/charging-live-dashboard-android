@@ -842,6 +842,7 @@ function renderVoters(d) {
     const rtRaw = realTypeNode && realTypeNode.value ? String(realTypeNode.value) : "";
     const rtShow = rtRaw && !/^(unknown|未连接（放电中）|未识别（充电中）)$/i.test(rtRaw) ? rtRaw : "";
     summary.push(`<span class="chip" title="battery 状态与 real_type">连接类型<b>${esc(connLabel)}</b>${rtShow ? `<small>${esc(rtShow)}</small>` : ""}</span>`);
+    const battMa = d.derived && d.derived.batt_current_ma;
     if (wiredCharging) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
       const ppStaleD = d.meta && d.meta.power_path_logs_stale;
@@ -858,30 +859,61 @@ function renderVoters(d) {
         if (ppStaleD) staleD = " · 路径日志读取异常";
       }
       summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
-      // 有线输入限流：buck_input 是 USB 输入侧 ICL votable；CP 路径下不在实际功率路径上，不展示
-      if (wcp.state !== "cp") {
+      if (wcp.state === "cp") {
+        // 有线 CP：Quick Charge 当前电池目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
+        const wd = wcp.cur_max && wcp.cur_max.cur_max !== undefined && wcp.cur_max.cur_max !== null
+          ? wcp.cur_max : null;
+        const wst = wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
+          && wcp.stage_cur_max.cur_max !== null ? wcp.stage_cur_max : null;
+        const curAge = o => (o && o.at) ? Math.max(0, Math.round((Date.now() - o.at) / 1000)) : null;
+        if (wd) {
+          const age = curAge(wd);
+          summary.push(`<span class="chip" title="mca_quick_charge_select_max_ibat 最终行 cur_max（算法目标，非实测电流）${wd.log_time ? " · 日志 " + esc(wd.log_time) : ""}">` +
+            `电池充电目标<b>${fmt(wd.cur_max, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}</small></span>`);
+        } else if (wst) {
+          const age = curAge(wst);
+          summary.push(`<span class="chip" title="仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
+            `阶段充电目标<b>${fmt(wst.cur_max, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值</small></span>`);
+        } else {
+          summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">电池充电目标<b>--</b><small>待刷新</small></span>`);
+        }
+        // CP 路径上限：div4_single / div4_multi 只是约束项，不冒充最终电流
+        const limSingle = effectiveOf(topics.div4_single);
+        const limMulti = effectiveOf(topics.div4_multi);
+        const cpLim = limSingle || limMulti;
+        if (cpLim) {
+          const limTopic = limSingle ? "div4_single" : "div4_multi";
+          summary.push(`<span class="chip" title="${limTopic} 投票上限（CP 路径约束，非最终充电目标）">` +
+            `CP ${wcp.ratio || ""}:1 路径上限<b>${fmt(cpLim.value, 0)}</b><small>${esc(cpLim.client)} · ${limTopic}</small></span>`);
+        }
+        if (battMa !== null && battMa !== undefined) {
+          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b>${fmt(Math.abs(battMa), 0)}</b><small>battery</small></span>`);
+        }
+      } else {
+        // 有线 Buck / 待确认：USB 输入侧 ICL + 电池侧 FCC
         addSummary("有线输入限流", effectiveOf(topics.buck_input), v => `${v}mA`);
+        addSummary("电池充电上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
       }
-    }
-    const battMa = d.derived && d.derived.batt_current_ma;
-    const dec = buck && buck.cur_max_decision;
-    // 电池侧算法上限：quick wireless 最近一次 cur_max:[Final]（带年龄，超 30s 标历史值）
-    if (dec && dec.final !== null && dec.final !== undefined) {
-      const decAge = dec.at ? Math.max(0, Math.round((Date.now() - dec.at) / 1000)) : null;
-      const stale = decAge !== null && decAge > 30;
-      summary.push(`<span class="chip"${stale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} ` +
-        `title="quick wireless select_max_ibat 的最终电池电流目标（非 MCA votable）${dec.log_time ? " · 日志 " + esc(dec.log_time) : ""}">` +
-        `电池侧算法上限<b>${dec.final}</b><small>quick_wireless cur_max${decAge !== null ? " · " + decAge + "s前" : ""}${stale ? " · 历史值/待刷新" : ""}</small></span>`);
-      const swEff = effectiveOf(topics.wireless_sw_thermal_ich);
-      if (swEff && swEff.value !== dec.final) {
-        summary.push(`<span class="chip" title="热控投票已更新，quick wireless 尚未重新输出 cur_max Final，等待收敛">` +
-          `最新限制候选<b>${swEff.value}</b><small>${esc(swEff.client)}${logsAge !== null ? " · " + logsAge + "s前" : ""} · 等待收敛</small></span>`);
-      }
-    } else if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
-      const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
-      summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc）">电池侧算法上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
     } else {
-      addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+      // 无线路径：quick wireless cur_max → 电池侧算法上限；缺失时回退 wireless loop buck_fcc；最后才是 buck_charge_curr
+      const dec = buck && buck.cur_max_decision;
+      if (dec && dec.final !== null && dec.final !== undefined) {
+        const decAge = dec.at ? Math.max(0, Math.round((Date.now() - dec.at) / 1000)) : null;
+        const stale = decAge !== null && decAge > 30;
+        summary.push(`<span class="chip"${stale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} ` +
+          `title="quick wireless select_max_ibat 的最终电池电流目标（非 MCA votable）${dec.log_time ? " · 日志 " + esc(dec.log_time) : ""}">` +
+          `电池侧算法上限<b>${dec.final}</b><small>quick_wireless cur_max${decAge !== null ? " · " + decAge + "s前" : ""}${stale ? " · 历史值/待刷新" : ""}</small></span>`);
+        const swEff = effectiveOf(topics.wireless_sw_thermal_ich);
+        if (swEff && swEff.value !== dec.final) {
+          summary.push(`<span class="chip" title="热控投票已更新，quick wireless 尚未重新输出 cur_max Final，等待收敛">` +
+            `最新限制候选<b>${swEff.value}</b><small>${esc(swEff.client)}${logsAge !== null ? " · " + logsAge + "s前" : ""} · 等待收敛</small></span>`);
+        }
+      } else if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
+        const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
+        summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc）">电池侧算法上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
+      } else {
+        addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+      }
     }
     const ceEff = effectiveOf(topics.chg_enable);
     const ceShown = ceEff && ceEff.value === 0
