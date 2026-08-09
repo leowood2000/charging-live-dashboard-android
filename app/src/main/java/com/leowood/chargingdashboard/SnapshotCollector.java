@@ -101,8 +101,8 @@ public final class SnapshotCollector {
     private volatile boolean rxIoutLimitCaptured = false;
     private volatile Long lastRxIoutLimitAt = null;
     private volatile String lastRxIoutLimitLogTime = null;
-    /** 最后一条 power_good_on 的本地时间 key，用于识别“新无线会话”。 */
-    private volatile String lastWlsSessionKey = null;
+    /** 最后一条 power_good_on 的归一化毫秒（会话边界 key，跨文件单调）。 */
+    private volatile Long lastWlsSessionMs = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private volatile boolean powerPathLogsStale = false;
@@ -190,40 +190,20 @@ public final class SnapshotCollector {
                 String epp = parseEpp(sessionLog);
                 if (epp != null) lastEpp = epp;
                 if (isLastWirelessPowerOff(sessionLog)) {
-                    // 无线已断开：清掉旧 ICL，避免上一个会话的值继续覆盖显示
-                    lastWlsIcl = null;
-                    lastWlsIclAt = null;
-                    lastWlsIclLogTime = null;
-                    lastWlsIclMs = null;
-                    lastWlsIclKey = null;
-                    lastWlsChgEn = null;
-                    lastQuickCurMax = null;
-                    lastBuckFcc = null;
-                    lastCpMode = null;
-                    lastCpWorkMode = null;
-                    lastWlsWorkModeMs = null;
-                    lastCurDecision = null;
-                    lastCurDecisionKey = null;
-                    lastWlsMode = "unknown";
-                    lastRxIoutLimit = null;
-                    rxIoutLimitCaptured = false;
-                    lastRxIoutLimitAt = null;
-                    lastRxIoutLimitLogTime = null;
-                    lastWlsSessionKey = null;
+                    // 无线已断开：清掉全部无线会话状态，避免上一会话的值继续覆盖显示
+                    clearWirelessSessionState();
+                    lastWlsSessionMs = null;
                 } else {
                     // 所有无线执行层数据统一按最近一次 power_good_on 截断，
                     // 避免上一会话的 ICL/buck_fcc 混进新会话
                     String wtail = splitAfterLastWirelessAttach(sessionLog);
-                    // rx_iout_limit 状态机：
-                    // power_good_on → 清空；本会话首次/后续出现 → 更新；
-                    // work_mode 切换、日志窗口滚动 → 不处理，继续持有旧值
-                    String pgKey = lastWirelessAttachKey(sessionLog);
-                    if (pgKey != null && !pgKey.equals(lastWlsSessionKey)) {
-                        lastWlsSessionKey = pgKey;
-                        lastRxIoutLimit = null;
-                        rxIoutLimitCaptured = false;
-                        lastRxIoutLimitAt = null;
-                        lastRxIoutLimitLogTime = null;
+                    // 无线会话状态机：只有真正的新 power_good_on（session key 变化）
+                    // 才统一清空全部 wireless-session scoped 状态；
+                    // 同一 power_good_on 重复出现在日志窗口不重置，避免 Final/ICL 假刷新。
+                    Long pgMs = lastWirelessAttachMs(sessionLog);
+                    if (pgMs != null && !pgMs.equals(lastWlsSessionMs)) {
+                        lastWlsSessionMs = pgMs;
+                        clearWirelessSessionState();
                     }
                     JSONObject wm = parseWirelessMode(wtail);
                     lastWlsMode = wm.optString("mode", "unknown");
@@ -251,10 +231,32 @@ public final class SnapshotCollector {
             }
             // 功率路径通道：高频信号，手机端已 tail -n 200 封顶
             if (ppReadOk) {
-                // quick wireless cur_max 同样只取最近一次无线会话之后，
-                // 断开时保持清空，避免旧窗口里的 Final 又被写回
-                if (isLastWirelessPowerOff(ppLog)) {
+                boolean ppOff = isLastWirelessPowerOff(ppLog);
+                Long pgMs = lastWirelessAttachMs(ppLog);
+                // 只有 pp 窗口出现比已确认会话更新的 power_good_on 才算真正新会话；
+                // 同一 power_good_on 重复出现在 tail 窗口不重置（避免 Final 假刷新）。
+                boolean ppNewSession = !ppOff && pgMs != null
+                        && (lastWlsSessionMs == null || pgMs > lastWlsSessionMs);
+                if (ppOff) {
+                    // pp 通道明确断开（session 通道失败时的兜底）：清无线 CP/quick 状态
+                    lastCpMode = null;
+                    lastCpWorkMode = null;
+                    lastWlsWorkModeMs = null;
+                    lastCurDecision = null;
+                    lastCurDecisionKey = null;
                     lastQuickCurMax = null;
+                    lastWlsSessionMs = null;
+                } else if (ppNewSession) {
+                    // 真正的新无线会话边界：统一清空 wireless-session scoped 状态，
+                    // 本轮 pp 有新证据再重新填（避免旧 Final 串进新会话）
+                    lastWlsSessionMs = pgMs;
+                    clearWirelessSessionState();
+                }
+                // quick wireless cur_max：只接受当前会话窗口内的值
+                if (ppOff) {
+                    lastQuickCurMax = null;
+                } else if (pgMs != null && !pgMs.equals(lastWlsSessionMs)) {
+                    // pp 窗口边界与会话 key 不一致：不采纳旧会话 cur_max
                 } else {
                     String wt = splitAfterLastWirelessAttach(ppLog);
                     Integer qcm = parseQuickCurMax(wt);
@@ -286,15 +288,23 @@ public final class SnapshotCollector {
                         }
                     }
                 }
-                // 无线 track：power_good 边界
-                if (cpState.optBoolean("w_boundary", false)) {
-                    lastCpMode = cpState.isNull("w_mode") ? null : cpState.getInt("w_mode");
-                    lastCpWorkMode = cpState.isNull("w_work") ? null : cpState.getInt("w_work");
+                // 无线 track：复用会话 key。同一 power_good_on 反复出现在窗口
+                // 不重置 lastCurDecisionKey，避免 at 被“本次扫描时间”假刷新。
+                if (ppOff) {
+                    // 上面已清空
+                } else if (ppNewSession) {
+                    lastCpMode = cpState.isNull("w_mode")
+                            ? null : cpState.getInt("w_mode");
+                    lastCpWorkMode = cpState.isNull("w_work")
+                            ? null : cpState.getInt("w_work");
                     lastWlsWorkModeMs = cpState.isNull("w_work_ms")
                             ? null : cpState.getLong("w_work_ms");
                     lastCurDecision = cpState.isNull("w_decision")
                             ? null : cpState.getJSONObject("w_decision");
                     lastCurDecisionKey = null;
+                } else if (cpState.optBoolean("w_boundary", false)
+                        && pgMs != null && !pgMs.equals(lastWlsSessionMs)) {
+                    // pp 窗口里的边界与已确认会话不一致：不采纳本轮 CP/Final
                 } else {
                     if (!cpState.isNull("w_mode")) lastCpMode = cpState.getInt("w_mode");
                     if (!cpState.isNull("w_work")) {
@@ -367,6 +377,30 @@ public final class SnapshotCollector {
         } catch (Exception e) {
             Log.w("ChargeDashboard", "collectLogs failed: " + e.getMessage());
         }
+    }
+
+    /** 无线会话级状态统一清空：真正的新 power_good_on 或断开时调用。
+     *  lastWlsSessionMs 由调用方维护；这里只清 wireless-session scoped 数据。 */
+    private void clearWirelessSessionState() {
+        lastWlsIcl = null;
+        lastWlsIclAt = null;
+        lastWlsIclLogTime = null;
+        lastWlsIclMs = null;
+        lastWlsIclKey = null;
+        lastWlsChgEn = null;
+        lastEpp = null;
+        lastQuickCurMax = null;
+        lastBuckFcc = null;
+        lastCpMode = null;
+        lastCpWorkMode = null;
+        lastWlsWorkModeMs = null;
+        lastCurDecision = null;
+        lastCurDecisionKey = null;
+        lastWlsMode = "unknown";
+        lastRxIoutLimit = null;
+        rxIoutLimitCaptured = false;
+        lastRxIoutLimitAt = null;
+        lastRxIoutLimitLogTime = null;
     }
 
     /** 统一发布入口：快/慢采集都经此写 snapshotJson，避免互相覆盖。 */
@@ -1411,16 +1445,18 @@ public final class SnapshotCollector {
                 .put("qc_enabled", qcEnabled);
     }
 
-    /** 最后一条 wireless power_good_on 的本地时间 key（无则 null）。 */
-    private String lastWirelessAttachKey(String text) {
-        String key = null;
+    /** 最后一条 wireless power_good_on 的归一化毫秒（会话边界 key，无则 null）。 */
+    private Long lastWirelessAttachMs(String text) {
+        Long last = null;
         for (String line : text.split("\n")) {
             if (line.contains("power_good_on")) {
                 Matcher tm = VOTE_TIME_RE.matcher(line);
-                if (tm.find()) key = shiftLogTime(tm.group(1));
+                if (tm.find()) {
+                    last = absLogMs(lastLogFname, shiftLogTime(tm.group(1)));
+                }
             }
         }
-        return key;
+        return last;
     }
 
     /** 无线/有线 CP 状态彻底解耦：power_good 只重置无线；usb online/real_type changed 只重置有线；
