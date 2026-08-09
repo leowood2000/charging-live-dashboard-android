@@ -101,6 +101,8 @@ public final class SnapshotCollector {
     private volatile boolean rxIoutLimitCaptured = false;
     private volatile Long lastRxIoutLimitAt = null;
     private volatile String lastRxIoutLimitLogTime = null;
+    /** SmartEndura / smartchg soc_limit 上下文（用于“当前上游限制”标记）。 */
+    private volatile boolean lastSmartenduraSocLimit = false;
     /** 最后一条 power_good_on 的归一化毫秒（会话边界 key，跨文件单调）。 */
     private volatile Long lastWlsSessionMs = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
@@ -189,6 +191,16 @@ public final class SnapshotCollector {
                 if (sessions.length() > 0) lastSessions = sessions;
                 String epp = parseEpp(sessionLog);
                 if (epp != null) lastEpp = epp;
+                // SmartEndura / smartchg soc_limit 上下文：会话日志中出现即置位
+                lastSmartenduraSocLimit = false;
+                for (String line : sessionLog.split("\n")) {
+                    if (line.contains("smartchg_soc_limit_callback")
+                            || line.contains("smart_charge_soc_limit")
+                            || line.contains("soc_limit_workfunc")) {
+                        lastSmartenduraSocLimit = true;
+                        break;
+                    }
+                }
                 if (isLastWirelessPowerOff(sessionLog)) {
                     // 无线已断开：清掉全部无线会话状态，避免上一会话的值继续覆盖显示
                     clearWirelessSessionState();
@@ -473,7 +485,8 @@ public final class SnapshotCollector {
                             ? 0L : lastRxIoutLimitAt.longValue())
                     .put("rx_iout_limit_time", lastRxIoutLimitLogTime == null
                             ? "" : lastRxIoutLimitLogTime)
-                    .put("rx_iout_limit_stale", logsStale);
+                    .put("rx_iout_limit_stale", logsStale)
+                    .put("smartendura_soc_limit", lastSmartenduraSocLimit);
         }
         // 有线 CP 三态：cp / buck / unknown（本会话无 SC8581 模式日志则待确认）
         JSONObject derived = core.optJSONObject("derived");
