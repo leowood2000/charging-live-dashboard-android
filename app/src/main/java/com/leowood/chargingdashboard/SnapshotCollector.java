@@ -97,6 +97,12 @@ public final class SnapshotCollector {
     /** 无线控制模式（bpp drawload / epp_plus/QC）与 RX 输出电流上限。 */
     private volatile String lastWlsMode = "unknown";
     private volatile Integer lastRxIoutLimit = null;
+    /** rx_iout_limit 会话状态机：随 power_good 边界，不随 work_mode；窗口滚动不失效。 */
+    private volatile boolean rxIoutLimitCaptured = false;
+    private volatile Long lastRxIoutLimitAt = null;
+    private volatile String lastRxIoutLimitLogTime = null;
+    /** 最后一条 power_good_on 的本地时间 key，用于识别“新无线会话”。 */
+    private volatile String lastWlsSessionKey = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private volatile boolean powerPathLogsStale = false;
@@ -200,14 +206,33 @@ public final class SnapshotCollector {
                     lastCurDecisionKey = null;
                     lastWlsMode = "unknown";
                     lastRxIoutLimit = null;
+                    rxIoutLimitCaptured = false;
+                    lastRxIoutLimitAt = null;
+                    lastRxIoutLimitLogTime = null;
+                    lastWlsSessionKey = null;
                 } else {
                     // 所有无线执行层数据统一按最近一次 power_good_on 截断，
                     // 避免上一会话的 ICL/buck_fcc 混进新会话
                     String wtail = splitAfterLastWirelessAttach(sessionLog);
+                    // rx_iout_limit 状态机：
+                    // power_good_on → 清空；本会话首次/后续出现 → 更新；
+                    // work_mode 切换、日志窗口滚动 → 不处理，继续持有旧值
+                    String pgKey = lastWirelessAttachKey(sessionLog);
+                    if (pgKey != null && !pgKey.equals(lastWlsSessionKey)) {
+                        lastWlsSessionKey = pgKey;
+                        lastRxIoutLimit = null;
+                        rxIoutLimitCaptured = false;
+                        lastRxIoutLimitAt = null;
+                        lastRxIoutLimitLogTime = null;
+                    }
                     JSONObject wm = parseWirelessMode(wtail);
                     lastWlsMode = wm.optString("mode", "unknown");
-                    lastRxIoutLimit = wm.isNull("rx_iout_limit")
-                            ? null : wm.getInt("rx_iout_limit");
+                    if (!wm.isNull("rx_iout_limit")) {
+                        lastRxIoutLimit = wm.getInt("rx_iout_limit");
+                        rxIoutLimitCaptured = true;
+                        lastRxIoutLimitAt = System.currentTimeMillis();
+                        lastRxIoutLimitLogTime = wm.optString("rx_iout_limit_time", "");
+                    }
                     WlsIcl icl = parseWlsIcl(wtail);
                     if (icl != null) {
                         String key = icl.value + "|" + icl.chgEn + "|" + icl.logTime;
@@ -379,9 +404,17 @@ public final class SnapshotCollector {
                 buck.put("wls_work_mode_ms", lastWlsWorkModeMs.longValue());
             }
             if (lastCurDecision != null) buck.put("cur_max_decision", lastCurDecision);
-            // 无线控制模式：BPP drawload 同域可比较；EPP+/QC 不同域不可比较
+            // 无线控制模式：仅标识 BPP drawload / EPP+/QC，不做 ICL/iout 一致性判定
             buck.put("wls_mode", lastWlsMode == null ? "unknown" : lastWlsMode);
-            if (lastRxIoutLimit != null) buck.put("rx_iout_limit", lastRxIoutLimit);
+            // rx_iout_limit：会话状态机输出（captured / at / stale）
+            buck.put("rx_iout_limit", lastRxIoutLimit == null
+                    ? JSONObject.NULL : lastRxIoutLimit.intValue())
+                    .put("rx_iout_limit_captured", rxIoutLimitCaptured)
+                    .put("rx_iout_limit_at", lastRxIoutLimitAt == null
+                            ? 0L : lastRxIoutLimitAt.longValue())
+                    .put("rx_iout_limit_time", lastRxIoutLimitLogTime == null
+                            ? "" : lastRxIoutLimitLogTime)
+                    .put("rx_iout_limit_stale", logsStale);
         }
         // 有线 CP 三态：cp / buck / unknown（本会话无 SC8581 模式日志则待确认）
         JSONObject derived = core.optJSONObject("derived");
@@ -1346,10 +1379,11 @@ public final class SnapshotCollector {
         return sb.toString();
     }
 
-    /** 无线控制模式：bpp_drawload（同域）/ epp_qc（不同域）/ unknown，最后证据覆盖前证据。 */
+    /** 无线控制模式：bpp_drawload / epp_qc / unknown，最后证据覆盖前证据（仅标识，不做 ICL/iout 比较）。 */
     private JSONObject parseWirelessMode(String text) throws JSONException {
         String mode = "unknown";
         Integer rxLimit = null;
+        String rxTime = "";
         boolean qcEnabled = false;
         for (String line : text.split("\n")) {
             if (line.contains("BPP drawload")) mode = "bpp_drawload";
@@ -1363,13 +1397,30 @@ public final class SnapshotCollector {
             Matcher m = RX_IOUT_LIMIT_RE.matcher(line);
             // 函数名 ...op_get_rx_iout_limit:421 里的行号也会匹配，
             // 必须取该行最后一次匹配（真正的 rx_iout_limit: 3800）
-            while (m.find()) rxLimit = Integer.parseInt(m.group(1));
+            while (m.find()) {
+                rxLimit = Integer.parseInt(m.group(1));
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                if (tm.find()) rxTime = shiftLogTime(tm.group(1));
+            }
             if (line.contains("can quick charge!")) qcEnabled = true;
         }
         return new JSONObject()
                 .put("mode", mode)
                 .put("rx_iout_limit", rxLimit == null ? JSONObject.NULL : rxLimit)
+                .put("rx_iout_limit_time", rxTime)
                 .put("qc_enabled", qcEnabled);
+    }
+
+    /** 最后一条 wireless power_good_on 的本地时间 key（无则 null）。 */
+    private String lastWirelessAttachKey(String text) {
+        String key = null;
+        for (String line : text.split("\n")) {
+            if (line.contains("power_good_on")) {
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                if (tm.find()) key = shiftLogTime(tm.group(1));
+            }
+        }
+        return key;
     }
 
     /** 无线/有线 CP 状态彻底解耦：power_good 只重置无线；usb online/real_type changed 只重置有线；
