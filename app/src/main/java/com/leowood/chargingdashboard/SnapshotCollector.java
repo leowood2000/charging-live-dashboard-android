@@ -293,12 +293,20 @@ public final class SnapshotCollector {
                 if (ppOff) {
                     // 上面已清空
                 } else if (ppNewSession) {
-                    lastCpMode = cpState.isNull("w_mode")
-                            ? null : cpState.getInt("w_mode");
-                    lastCpWorkMode = cpState.isNull("w_work")
-                            ? null : cpState.getInt("w_work");
-                    lastWlsWorkModeMs = cpState.isNull("w_work_ms")
-                            ? null : cpState.getLong("w_work_ms");
+                    if (!cpState.isNull("w_mode")) {
+                        lastCpMode = cpState.getInt("w_mode");
+                        if (lastCpMode == 0) {
+                            // 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
+                            lastCpWorkMode = null;
+                            lastWlsWorkModeMs = null;
+                        }
+                    }
+                    if (!cpState.isNull("w_work")) {
+                        lastCpWorkMode = cpState.getInt("w_work");
+                        if (!cpState.isNull("w_work_ms")) {
+                            lastWlsWorkModeMs = cpState.getLong("w_work_ms");
+                        }
+                    }
                     lastCurDecision = cpState.isNull("w_decision")
                             ? null : cpState.getJSONObject("w_decision");
                     lastCurDecisionKey = null;
@@ -306,7 +314,14 @@ public final class SnapshotCollector {
                         && pgMs != null && !pgMs.equals(lastWlsSessionMs)) {
                     // pp 窗口里的边界与已确认会话不一致：不采纳本轮 CP/Final
                 } else {
-                    if (!cpState.isNull("w_mode")) lastCpMode = cpState.getInt("w_mode");
+                    if (!cpState.isNull("w_mode")) {
+                        lastCpMode = cpState.getInt("w_mode");
+                        if (lastCpMode == 0) {
+                            // 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
+                            lastCpWorkMode = null;
+                            lastWlsWorkModeMs = null;
+                        }
+                    }
                     if (!cpState.isNull("w_work")) {
                         lastCpWorkMode = cpState.getInt("w_work");
                         if (!cpState.isNull("w_work_ms")) {
@@ -424,15 +439,25 @@ public final class SnapshotCollector {
                         .put("actual_limit_source",
                                 lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
             }
-            // 三态：cp（本会话 operation mode>0）/ buck（本会话明确 mode=0）/ unknown（无新日志待确认）
-            if (lastCpMode != null) {
-                buck.put("cp_state", lastCpMode > 0 ? "cp" : "buck");
+            // 无线路径判定（当前 power_good 会话缓存）：
+            // 1) quick wireless work_mode=1/2/4 → CP 硬证据（无需 operation mode）
+            // 2) operation mode>0 → CP；operation mode=0 → Buck（并清掉旧 work_mode）
+            // 3) 均无 → unknown
+            if (lastCpWorkMode != null
+                    && (lastCpWorkMode == 1 || lastCpWorkMode == 2 || lastCpWorkMode == 4)) {
+                buck.put("cp_state", "cp");
+                buck.put("cp_ratio", lastCpWorkMode);
+                buck.put("cp_active", true);
+            } else if (lastCpMode != null) {
+                boolean cpActive = lastCpMode > 0;
+                buck.put("cp_state", cpActive ? "cp" : "buck");
+                buck.put("cp_active", cpActive);
+                if (cpActive && lastCpWorkMode != null) {
+                    buck.put("cp_ratio", lastCpWorkMode);
+                }
             } else {
                 buck.put("cp_state", "unknown");
-            }
-            buck.put("cp_active", lastCpMode != null && lastCpMode > 0);
-            if (lastCpMode != null && lastCpMode > 0 && lastCpWorkMode != null) {
-                buck.put("cp_ratio", lastCpWorkMode);
+                buck.put("cp_active", false);
             }
             if (lastWlsWorkModeMs != null) {
                 buck.put("wls_work_mode_ms", lastWlsWorkModeMs.longValue());
