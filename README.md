@@ -11,7 +11,7 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 |---|---|---|---|
 | <img src="screenshots/01-top-kpi.png" width="230"> | <img src="screenshots/02-strategy-realtime.png" width="230"> | <img src="screenshots/03-vote-cp.png" width="230"> | <img src="screenshots/04-arbitration.png" width="230"> |
 
-截图为 K80 Pro（miro）实机画面：首页 KPI、私有快充协商、无线/有线策略实时、MCA 投票与总仲裁结果（RX 输出电流上限 / 实测 RX 输出 / 电池充电电流上限）。
+截图为 K80 Pro（miro）实机画面：首页 KPI、私有快充协商、无线/有线策略实时、MCA 投票与总仲裁结果（无线平台输入 ICL / 电池充电电流上限）。
 
 ## 功能
 
@@ -31,8 +31,8 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 无线功率路径判定：quick wireless `work_mode=1/2/4` 是 CP 硬证据（本会话捕获后持续持有，窗口滚动不失效），`operation mode>0` 作交叉验证、`operation mode=0` 明确切 Buck（并清旧 work_mode），均无 → 待确认；首页显示“当前功率路径”（电荷泵 · 1:1/2:1/4:1 / Buck 直充）
 - “当前功率路径”chip 附带电荷泵转换比（由 quick wireless work_mode 映射：1:1 bypass / 2:1 div2 / 4:1 div4）
 - 未充电（battery STATUS ≠ Charging）时隐藏全部投票/仲裁卡片，仅保留生效场景、虚拟温度、电池温度与 JEITA 静态参数，避免“没充电还挂着一堆票”
-- `wireless_buck_input` 固定放在详情卡：MCA 仲裁（effective 赢家）+ ADSP 无线 ICL（prop 0x1003）+ `xm_wls` 能力票 + 说明（已下发 ADSP，闭源固件如何应用不可见，不等同 RX 输出电流上限），不再进入首页总仲裁
-- 总仲裁无线输入侧只显示可物理解释的限制：**RX 输出电流上限**（`strategy_class_wireless_op_get_rx_iout_limit` 按充电器类型/模式查表，允许上限）+ **实际 RX 输出电流**（wls_debug iout）；`wireless_buck_input` / `wls_icl` / `xm_wls` / `wireless_qc` 不进总仲裁
+- `wireless_buck_input` 提升为总仲裁上游层“无线平台输入 ICL”（effective → ADSP 0x1003，上游策略，非 Buck 专属）；详情卡保留 MCA 仲裁、控制模式、RX 输出允许上限、实际 RX 输出、`xm_wls` 能力票与说明
+- 总仲裁无线侧只放当前充电控制/最终限制结果：无线平台输入 ICL + 当前电池充电电流上限（按功率路径取 `cur_max:[Final]` 或 `buck_charge_curr`）；RX 输出上限、实测 RX 输出、控制模式、连接类型移入详情卡
 - `rx_iout_limit` 随无线会话保持：`power_good_on` 捕获、会话内持续有效，`work_mode`（1:1/2:1/4:1）切换与日志窗口滚动不失效，`power_good_off` 清空；会话日志读取失败时保留值并标 stale
 - 无线平台输入 ICL：总仲裁上游层取 `wireless_buck_input` effective（ADSP prop 0x1003，上游策略，非 Buck 专属）；EPP+/QC 下与 RX iout 映射未闭环、不做数值比较；`soc_limit` 为 effective winner + SmartEndura 上下文 + ibat≈0 时标“当前上游限制”
 - 无线电池侧上限按当前功率路径选择：CP 生效 → 总览只显示 quick wireless `cur_max:[Final]`（算法决策，带年龄/历史值标注），不单独展示“无线热控上限”（`wireless_sw_thermal_ich` effective 与本轮 `sw_thermal_ichg` 不等价，热控输入在 Quick Wireless 决策卡内看）；Buck 生效 → `buck_charge_curr` effective + 无线热控上限取 `wireless_thermal_XXw`；多票显示待确认、不做 max 猜测；路径未确认 → 显示“待确认”，不用 Buck FCC 冒充当前上限；`buck_charge_curr` 在 CP 下标注“Buck 路径 FCC”
@@ -47,7 +47,7 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 无线/有线 SC8581 状态彻底解耦：`power_good` 只重置无线 track，`usb online` / `real_type changed` 只重置有线 track；SC8581 operation mode 仅在对应 quickchg 上下文出现后写入对应 track，避免跨会话/跨模式互相污染
 - 有线 Buck 确认：当前有线会话出现 `mca_strategy_buckchg / strategy_buckchg` 活动且无 CP 证据时，路径判为“Buck 直充（有线）”（如 HVDCP_3/QC3）；有线状态按时间顺序 + CP 证据优先（mode>0 / mode=0 后 cur_work_cp → CP，mode=0 或 buckchg → Buck，均无 → 待确认）
 - ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
-- 总仲裁只显示实际结果：无线输入侧 = RX 输出电流上限 + 实测 RX 输出；不再把 `wls_icl` 或 `wireless_buck_input` effective 当成“实际输入限流”展示
+- 总仲裁只显示实际结果：无线输入侧 = 无线平台输入 ICL（`wireless_buck_input` effective → ADSP 0x1003，上游策略）；`soc_limit` winner + SmartEndura 上下文 + ibat≈0 时标“当前上游限制”
 - 不再用 `wls_icl` 与 `iout` 做“限流未生效”判定（BPP/EPP+/QC 均不比较）：反编译证据链为 `effective → strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)`，落地权在闭源 ADSP 固件
 - 热控电流上限（wired/wireless_chg_curr）按 µA → mA 换算并标注“策略上限”，不再把原始值当 mA 显示
 - 电池 INPUT_CURRENT_LIMIT 按 µA→mA、TIME_TO_FULL_NOW 按秒→分钟换算
@@ -78,13 +78,13 @@ gradle assembleDebug
 
 ## 仲裁展示说明
 
-v0.10.2 起，首页“总仲裁结果”无线侧只展示：
+v0.10.4 起，首页“总仲裁结果”无线侧只放当前充电控制/最终限制结果：
 
-- **RX 输出电流上限**：`strategy_class_wireless_op_get_rx_iout_limit` 按充电器类型/模式查表得到的允许上限（如 2800mA），随无线会话保持，`work_mode` 切换不失效
-- **实际 RX 输出电流**：wls_debug iout 实时遥测
+- **无线平台输入 ICL**：`wireless_buck_input` effective（ADSP GLINK prop 0x1003，上游策略，非 Buck 专属）；EPP+/QC 下与 RX iout 映射未闭环、不做数值比较
+- **当前电池充电电流上限**：CP 路径取 quick wireless `cur_max:[Final]`（算法决策，带年龄/历史值），Buck 路径取 `buck_charge_curr` effective
 
-`wireless_buck_input` 的 MCA 仲裁（`effective vote is now ...`）、`wls_icl`
-（经 ADSP GLINK prop 0x1003 下发）与 `xm_wls` 能力票保留在详情卡，不再进入总仲裁。
+`RX 输出允许上限`（`strategy_class_wireless_op_get_rx_iout_limit` 查表值）、`实际 RX 输出`
+（wls_debug iout）、控制模式（BPP/EPP+）、连接类型等链路能力/遥测信息收进详情卡。
 
 反汇编证据（K80 Pro miro 固件 `mca_*.ko`）：
 
