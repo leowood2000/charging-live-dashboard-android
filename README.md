@@ -11,7 +11,7 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 |---|---|---|---|
 | <img src="screenshots/01-top-kpi.png" width="230"> | <img src="screenshots/02-strategy-realtime.png" width="230"> | <img src="screenshots/03-vote-cp.png" width="230"> | <img src="screenshots/04-arbitration.png" width="230"> |
 
-截图为 K80 Pro（miro）实机画面：首页 KPI、私有快充协商、无线/有线策略实时、MCA 投票与总仲裁结果（仲裁值 / 实际下发 ICL / 实时 iout 同屏对照）。
+截图为 K80 Pro（miro）实机画面：首页 KPI、私有快充协商、无线/有线策略实时、MCA 投票与总仲裁结果（RX 输出电流上限 / 实测 RX 输出 / 电池充电电流上限）。
 
 ## 功能
 
@@ -20,7 +20,7 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 私有快充协商（quick_charge_type / power_max / EPP 协商状态）
 - 无线/有线热控实时数据（无线热控限流、有线热控等级、热控档位投票）
 - 电流投票实时表 + **总仲裁结果**（生效客户、最终值、推算值）
-- MCA 仲裁展示修正：驱动 `effective vote is now` 优先，`wireless loop: icl` 单独显示为“实际下发 ICL”，不再混为一谈
+- MCA 仲裁展示修正：驱动 `effective vote is now` 优先；`wls_icl` 经反编译确认为 **ADSP GLINK prop 0x1003** 下发的无线输入限流，详情卡单独标注，不再与 RX 输出电流混为一谈
 - 每个 votable 标注仲裁类型（大部分来自 .ko 反汇编核实；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，仅详情卡“参考推算”），未知类型不做盲目推算
 - 投票解析支持 `voting on/off`，并按主题分别缓存最近变动与结果，避免日志交错串线
 - 投票区只显示**生效主题**（有启用票或驱动已给出实际结果）
@@ -31,9 +31,10 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 功率路径判定只以 sc8581 电荷泵 work_mode 为准（不用电流大小猜测）：首页显示“当前功率路径”（电荷泵 / Buck 直充）
 - “当前功率路径”chip 附带电荷泵转换比（由 quick wireless work_mode 映射：1:1 bypass / 2:1 div2 / 4:1 div4）
 - 未充电（battery STATUS ≠ Charging）时隐藏全部投票/仲裁卡片，仅保留生效场景、虚拟温度、电池温度与 JEITA 静态参数，避免“没充电还挂着一堆票”
-- 电荷泵路径生效时，首页隐藏 `wireless_buck_input`，折叠到“仲裁详情 · 未生效”卡（保留名义仲裁与投票，标注退出 CP 后将使用该限流）
-- 总仲裁“无线输入限流”优先显示驱动实际下发的 `wireless loop: icl`（证据链 soc_limit → effective → icl），仅在实际输入电流明显违反时标注“未生效”
-- 电池侧显示“电池侧算法上限”（quick wireless 最近一次 `cur_max:[Final]`，带年龄，超 30s 标“历史值/待刷新”）与“最新限制候选”（如 wireless_sw_thermal_ich 新值，等待 quick wireless 收敛），不与输入侧 ICL 混淆
+- `wireless_buck_input` 固定放在详情卡：MCA 仲裁（effective 赢家）+ ADSP 无线 ICL（prop 0x1003）+ `xm_wls` 能力票 + 说明（已下发 ADSP，闭源固件如何应用不可见，不等同 RX 输出电流上限），不再进入首页总仲裁
+- 总仲裁无线输入侧只显示可物理解释的限制：**RX 输出电流上限**（`strategy_class_wireless_op_get_rx_iout_limit` 按充电器类型/模式查表，允许上限）+ **实际 RX 输出电流**（wls_debug iout）；`wireless_buck_input` / `wls_icl` / `xm_wls` / `wireless_qc` 不进总仲裁
+- `rx_iout_limit` 随无线会话保持：`power_good_on` 捕获、会话内持续有效，`work_mode`（1:1/2:1/4:1）切换与日志窗口滚动不失效，`power_good_off` 清空；会话日志读取失败时保留值并标 stale
+- 电池侧显示 `buck_charge_curr` 的 MCA 仲裁结果（**电池充电电流上限**）；quick wireless `cur_max:[Final]` 保留在下方“Quick Wireless 电池电流决策”卡
 - 新增只读卡“Quick Wireless 电池电流决策”：展示 select_max_ibat 的五个输入（channel_cur / temp_max_cur / tx_adapter_max / sw_qc_ichg / sw_thermal_ichg，标注当前瓶颈）、`cur_max:[Final]` 与实际 ibat，明确标注“算法聚合 · 非 MCA votable”
 - CP 状态按会话解析：遇到 `power_good_on/off` 重置，只保留当前会话内的 sc8581 模式/分压比/cur_max，避免上一会话残留冒充当前值（如换垫后 6V Buck 不再误显示 2:1）
 - 功率路径三态显示：cp（本会话 operation mode>0，附 2:1 等分压比）/ buck（本会话明确 mode=0）/ Buck / CP 未激活（待确认）（本会话尚无 SC8581 模式日志）
@@ -45,8 +46,8 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 无线/有线 SC8581 状态彻底解耦：`power_good` 只重置无线 track，`usb online` / `real_type changed` 只重置有线 track；SC8581 operation mode 仅在对应 quickchg 上下文出现后写入对应 track，避免跨会话/跨模式互相污染
 - 有线 Buck 确认：当前有线会话出现 `mca_strategy_buckchg / strategy_buckchg` 活动且无 CP 证据时，路径判为“Buck 直充（有线）”（如 HVDCP_3/QC3）；有线状态按时间顺序 + CP 证据优先（mode>0 / mode=0 后 cur_work_cp → CP，mode=0 或 buckchg → Buck，均无 → 待确认）
 - ICL 带日志时间与采集时刻，`power_good_off` 后自动清零，旧会话残留一目了然
-- 总仲裁只显示实际结果：无线输入限流在仲裁值未生效时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless cur_max / buck_fcc），不再误标为无线输入电流；保留生效场景 / 虚拟温度 / 电池温度
-- 实际下发 ICL / 实时 iout / 限流未生效细节移到 wireless_buck_input 详情卡，并按物理功率比（icl × vrect / vbat）判定
+- 总仲裁只显示实际结果：无线输入侧 = RX 输出电流上限 + 实测 RX 输出；不再把 `wls_icl` 或 `wireless_buck_input` effective 当成“实际输入限流”展示
+- 不再用 `wls_icl` 与 `iout` 做“限流未生效”判定（BPP/EPP+/QC 均不比较）：反编译证据链为 `effective → strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)`，落地权在闭源 ADSP 固件
 - 热控电流上限（wired/wireless_chg_curr）按 µA → mA 换算并标注“策略上限”，不再把原始值当 mA 显示
 - 电池 INPUT_CURRENT_LIMIT 按 µA→mA、TIME_TO_FULL_NOW 按秒→分钟换算
 - 移动端电池标准属性恢复两列，长字段（型号/类型）跨两列
@@ -75,9 +76,20 @@ gradle assembleDebug
 
 ## 仲裁展示说明
 
-首页“总仲裁结果”里的 **无线输入限流** 表示 MCA 驱动的逻辑仲裁结果（来源为内核日志
-`effective vote is now ...`）；**实际下发 ICL** 表示 `wireless loop: icl:` 打印的、
-经过协议/硬件/保护逻辑处理后的真实下发值。两者含义不同，页面会同时展示并给出差值。
+v0.10.2 起，首页“总仲裁结果”无线侧只展示：
+
+- **RX 输出电流上限**：`strategy_class_wireless_op_get_rx_iout_limit` 按充电器类型/模式查表得到的允许上限（如 2800mA），随无线会话保持，`work_mode` 切换不失效
+- **实际 RX 输出电流**：wls_debug iout 实时遥测
+
+`wireless_buck_input` 的 MCA 仲裁（`effective vote is now ...`）、`wls_icl`
+（经 ADSP GLINK prop 0x1003 下发）与 `xm_wls` 能力票保留在详情卡，不再进入总仲裁。
+
+反汇编证据（K80 Pro miro 固件 `mca_*.ko`）：
+
+- `wireless_buck_input`：type=0（Set_And/MIN），默认 1100mA，回调 `strategy_wireless_set_input_curr_limit`
+- `wireless_qc` / `xm_wls`：均为真实 mA 投票；MIN(1300,100)=100 时 100 是 effective winner
+- `wls_icl` 最终写入：`platform_class_buckchg_ops_set_wls_input_curr_lmt` → `mca_adsp_glink_write_prop(0x1003, value, 4)`，发给 ADSP 固件（有线 USB ICL 对应 prop 0x2008）
+- `rx_iout_limit`：按充电器类型/内部模式查表（1000/1100/1700/2000/2500/2800/3800/4900 mA），是 RX 输出电流上限，不是 `wls_icl`
 
 投票类型大部分来自对 miro 固件 `mca_*.ko` 的反汇编核实，而非按单位猜测；`buck_charge_curr` 标注为项目假设（`MIN_ASSUMED`），无驱动 effective 行时仅作“参考推算”：
 
