@@ -50,7 +50,8 @@ K80 Pro（及同类 MIUI/HyperOS root 机型）无线/有线充电实时仪表�
 - 不再用 `wls_icl` 与 `iout` 做“限流未生效”判定（BPP/EPP+/QC 均不比较）：反编译证据链为 `effective → strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)`，落地权在闭源 ADSP 固件
 - 热控电流上限（wired/wireless_chg_curr）按 µA → mA 换算并标注“策略上限”，不再把原始值当 mA 显示
 - 电池 INPUT_CURRENT_LIMIT 按 µA→mA、TIME_TO_FULL_NOW 按秒→分钟换算
-- 移动端电池标准属性恢复两列，长字段（型号/类型）跨两列
+- 主界面精简：删除“芯片与系统 / 电荷泵与电池 / 电流投票与限流 / 电池标准属性”四张卡；对应 sysfs 节点与 battery uevent 仍完整保留在 `/api/data` 与页面底部原始 JSON，排查不受影响
+- 页面层次：实时数据 → 曲线 → 当前充电限制 → MCA 投票详情 → 会话档案
 - 会话档案只保留最近 3 个
 - real_type=Unknown 状态化显示（放电=未连接，充电=未识别）
 - 投票未知主题不再默认 mA 单位；effective/投票表行 client 正则与 voting 行统一
