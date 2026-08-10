@@ -46,6 +46,10 @@ public final class SnapshotCollector {
     private static final String BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent";
     private static final String USB_UEVENT = "/sys/class/power_supply/usb/uevent";
     private static final int HISTORY_MAX = 180;
+    // 实机快充切换测试：Buck 时为 0mA，CP 预启动会短暂出现 3~5mA，
+    // 真正承载后直接跃升至 400mA 以上。
+    private static final double CP_IBUS_BUCK_MAX_MA = 20.0;
+    private static final double CP_IBUS_ACTIVE_MIN_MA = 100.0;
     private static final int SESSION_MAX = 1;
     private static final int SESSION_EVENT_MAX = 100;
 
@@ -463,7 +467,8 @@ public final class SnapshotCollector {
                         .put("actual_limit_source",
                                 lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
             }
-            // 活跃无线充电优先采用 3 秒实时 CP 总线电流；空闲时回退当前会话日志。
+            // 活跃无线充电优先采用 3 秒实时 CP 支路电流；不要把预启动的
+            // 3~5mA 当作当前主功率路径已经切到 CP。
             JSONObject battery = core.optJSONObject("battery");
             JSONObject status = battery == null ? null : battery.optJSONObject("status");
             String battStatus = status == null ? "" : status.optString("value", "");
@@ -481,8 +486,9 @@ public final class SnapshotCollector {
                     && Double.isFinite(battCurrent) && battCurrent > 0
                     && Double.isFinite(cpIbus);
             if (liveWirelessCharging) {
-                boolean cpActive = Math.abs(cpIbus) >= 1.0;
-                buck.put("cp_state", cpActive ? "cp" : "buck");
+                String cpState = classifyWirelessCpIbus(cpIbus);
+                boolean cpActive = "cp".equals(cpState);
+                buck.put("cp_state", cpState);
                 buck.put("cp_active", cpActive);
                 buck.put("cp_state_source", "sysfs_cp_ibus_total");
                 buck.put("cp_ibus_total_ma", cpIbus);
@@ -982,6 +988,13 @@ public final class SnapshotCollector {
 
     private static void putFinite(JSONObject o, String key, double v) throws JSONException {
         o.put(key, Double.isFinite(v) ? v : JSONObject.NULL);
+    }
+
+    private static String classifyWirelessCpIbus(double cpIbusMa) {
+        double current = Math.abs(cpIbusMa);
+        if (current >= CP_IBUS_ACTIVE_MIN_MA) return "cp";
+        if (current <= CP_IBUS_BUCK_MAX_MA) return "buck";
+        return "transition";
     }
 
     private static JSONObject parseUevent(String text) throws JSONException {

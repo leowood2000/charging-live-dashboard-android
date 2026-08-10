@@ -2,7 +2,7 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.9（versionCode 56）**。
+当前版本：**v0.11.10（versionCode 57）**。
 
 Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/charging-live-dashboard)。两版的数据语义保持一致。
 
@@ -32,7 +32,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 ### 已校正的数据语义
 
 - 实时数据中的“电池温度”是电芯实体温度；“当前限制”中的绿色“虚拟温度”是 mi_thermald 的主要温控决策温度，并与当前热控场景放在一起。
-- 活跃无线充电时优先读取实时 `mca_platform_cp/ibus_total`：总线电流大于 0 判定为 CP，等于 0 判定为 Buck；空闲、暂停或节点缺失时才回退当前会话日志。
+- 活跃无线充电时优先读取实时 `mca_platform_cp/ibus_total`：实机验证 `≤20mA` 判定为 Buck、`≥100mA` 判定为 CP、`>20mA 且 <100mA` 显示“切换中”；避免把电荷泵预启动的 3–5mA 误判为当前 CP 主路径。空闲、暂停或节点缺失时才回退当前会话日志。
 - 当前电池充电电流上限按路径取值：CP 使用 Quick Wireless `cur_max:[Final]`；Buck 使用 `buck_charge_curr effective`；路径不确定时显示“待确认”。
 - 无线输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；实际 RX 输出取 `wls_debug iout`，属于遥测。二者配对观察，但不做数值一致性判断。
 - `wireless_qc=100` 表示策略修正/下降量语义，不能解释为“最终输入限流为 100mA”，也不能作为最终无线输入 ICL。
