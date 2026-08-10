@@ -22,12 +22,13 @@ public final class RootShell {
     private static volatile String suPath = null;
     private static volatile long suCheckedAt = 0;
     private static final long SU_RETRY_MS = 8000;
+    // exec 已串行化，正常只复用一个线程；cached pool 允许超时流未及时退出时自愈。
     private static final ExecutorService IO_POOL = Executors.newCachedThreadPool();
 
     private RootShell() {}
 
     /** 边运行边消费子进程输出，避免管道缓冲区写满导致 waitFor 超时。 */
-    public static String exec(String command, long timeoutSec) {
+    public static synchronized String exec(String command, long timeoutSec) {
         String su = resolveSu();
         if (su == null) return "";
         Process p = null;

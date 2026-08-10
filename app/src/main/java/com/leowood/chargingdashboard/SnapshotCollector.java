@@ -46,7 +46,7 @@ public final class SnapshotCollector {
     private static final String BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent";
     private static final String USB_UEVENT = "/sys/class/power_supply/usb/uevent";
     private static final int HISTORY_MAX = 180;
-    private static final int SESSION_MAX = 3;
+    private static final int SESSION_MAX = 1;
     private static final int SESSION_EVENT_MAX = 100;
 
     private final Deque<JSONObject> history = new ArrayDeque<>();
@@ -108,6 +108,11 @@ public final class SnapshotCollector {
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private volatile boolean powerPathLogsStale = false;
+    /** 连接/充电时保持日志实时；完全断开时降频，避免空转重扫历史日志。 */
+    private volatile boolean logsActive = true;
+    private volatile long lastLogsStartedAt = 0L;
+    private static final long ACTIVE_LOG_INTERVAL_MS = 10_000L;
+    private static final long IDLE_LOG_INTERVAL_MS = 60_000L;
     private String lastError = "";
     private boolean rootOk = false;
     private final int utcOffsetMinutes = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
@@ -120,7 +125,7 @@ public final class SnapshotCollector {
     }
 
     /** 快速采集：sysfs + battery + thermal.dump + history，每 3 秒一次。 */
-    public void collectFast() {
+    public synchronized void collectFast() {
         if (!rootOk) {
             rootOk = RootShell.isRootAvailable();
             if (!rootOk) {
@@ -137,11 +142,9 @@ public final class SnapshotCollector {
                 return;
             }
             JSONObject parsed = build(batch);
+            updateLogsActive(parsed);
             parsed.put("mode", "live");
             parsed.put("connected", true);
-            parsed.put("thermal", parseThermalDump(
-                    RootShell.exec("tail -c 65536 " + THERMAL_DUMP
-                            + " | grep -a -E 'MONITOR-WIRELESS' | tail -n 3", 15)));
 
             JSONObject sample = new JSONObject();
             JSONObject d = parsed.getJSONObject("derived");
@@ -168,19 +171,28 @@ public final class SnapshotCollector {
         }
     }
 
-    /** 慢速采集：投票 + 会话 + EPP，每 20 秒一次，避免高频重扫十几 MB 日志。 */
-    public void collectLogs() {
+    /** 调度器调用前的轻量门控：连接时 10 秒，完全断开时 60 秒。 */
+    public boolean shouldCollectLogs() {
+        long interval = logsActive ? ACTIVE_LOG_INTERVAL_MS : IDLE_LOG_INTERVAL_MS;
+        return System.currentTimeMillis() - lastLogsStartedAt >= interval;
+    }
+
+    private int logsIntervalSeconds() {
+        return (int) ((logsActive ? ACTIVE_LOG_INTERVAL_MS : IDLE_LOG_INTERVAL_MS) / 1000L);
+    }
+
+    /** 慢速采集：投票 + 会话 + EPP。 */
+    public synchronized void collectLogs() {
+        lastLogsStartedAt = System.currentTimeMillis();
         try {
-            String voteLog = readVoteLogs();
+            LogBundle logs = readLogs();
+            String voteLog = logs.vote;
             Log.i("ChargeDashboard", "voteLogLen=" + voteLog.length());
-            String sessionLog = readSessionLogs();
-            String ppLog = readPowerPathLogs();
-            // 用完成标记区分“命令成功但无匹配”和“命令失败”
-            boolean sessionReadOk = sessionLog.contains("__SESS_OK__");
-            sessionLog = sessionLog.replace("__SESS_OK__", "").trim();
-            boolean ppReadOk = ppLog.contains("__PP_OK__");
-            ppLog = ppLog.replace("__PP_OK__", "").trim();
-            boolean voteReadOk = !voteLog.isEmpty();
+            String sessionLog = logs.session;
+            String ppLog = logs.powerPath;
+            boolean voteReadOk = logs.voteOk;
+            boolean sessionReadOk = logs.sessionOk;
+            boolean ppReadOk = logs.powerPathOk;
             // 读取成功才解析；解析无匹配（如当前无投票输出）不覆盖旧数据也不算失败
             if (voteReadOk) {
                 JSONObject voters = parseVotes(voteLog);
@@ -451,25 +463,50 @@ public final class SnapshotCollector {
                         .put("actual_limit_source",
                                 lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
             }
-            // 无线路径判定（当前 power_good 会话缓存）：
-            // 1) quick wireless work_mode=1/2/4 → CP 硬证据（无需 operation mode）
-            // 2) operation mode>0 → CP；operation mode=0 → Buck（并清掉旧 work_mode）
-            // 3) 均无 → unknown
-            if (lastCpWorkMode != null
+            // 活跃无线充电优先采用 3 秒实时 CP 总线电流；空闲时回退当前会话日志。
+            JSONObject battery = core.optJSONObject("battery");
+            JSONObject status = battery == null ? null : battery.optJSONObject("status");
+            String battStatus = status == null ? "" : status.optString("value", "");
+            JSONObject derived = core.optJSONObject("derived");
+            double cpIbus = derived == null ? Double.NaN
+                    : derived.optDouble("cp_ibus_total_ma", Double.NaN);
+            double inputIout = derived == null ? Double.NaN
+                    : derived.optDouble("input_current_ma", Double.NaN);
+            double battCurrent = derived == null ? Double.NaN
+                    : derived.optDouble("batt_current_ma", Double.NaN);
+            boolean liveWirelessCharging = derived != null
+                    && "wireless".equals(derived.optString("input_source"))
+                    && "Charging".equalsIgnoreCase(battStatus)
+                    && Double.isFinite(inputIout) && inputIout > 0
+                    && Double.isFinite(battCurrent) && battCurrent > 0
+                    && Double.isFinite(cpIbus);
+            if (liveWirelessCharging) {
+                boolean cpActive = Math.abs(cpIbus) >= 1.0;
+                buck.put("cp_state", cpActive ? "cp" : "buck");
+                buck.put("cp_active", cpActive);
+                buck.put("cp_state_source", "sysfs_cp_ibus_total");
+                buck.put("cp_ibus_total_ma", cpIbus);
+                if (cpActive && lastCpWorkMode != null) {
+                    buck.put("cp_ratio", lastCpWorkMode);
+                }
+            } else if (lastCpWorkMode != null
                     && (lastCpWorkMode == 1 || lastCpWorkMode == 2 || lastCpWorkMode == 4)) {
                 buck.put("cp_state", "cp");
                 buck.put("cp_ratio", lastCpWorkMode);
                 buck.put("cp_active", true);
+                buck.put("cp_state_source", "quick_wireless_work_mode");
             } else if (lastCpMode != null) {
                 boolean cpActive = lastCpMode > 0;
                 buck.put("cp_state", cpActive ? "cp" : "buck");
                 buck.put("cp_active", cpActive);
+                buck.put("cp_state_source", "sc8581_operation_mode");
                 if (cpActive && lastCpWorkMode != null) {
                     buck.put("cp_ratio", lastCpWorkMode);
                 }
             } else {
                 buck.put("cp_state", "unknown");
                 buck.put("cp_active", false);
+                buck.put("cp_state_source", "none");
             }
             if (lastWlsWorkModeMs != null) {
                 buck.put("wls_work_mode_ms", lastWlsWorkModeMs.longValue());
@@ -509,11 +546,12 @@ public final class SnapshotCollector {
         if (meta == null) meta = new JSONObject();
         meta.put("interval", 3)
                 .put("fast_interval", 3)
-                .put("logs_interval", 10)
+                .put("logs_interval", logsIntervalSeconds())
                 .put("logs_updated_at", lastLogsUpdatedAt)
                 .put("logs_stale", logsStale)
                 .put("power_path_logs_stale", powerPathLogsStale)
-                .put("adb", "root-direct");
+                .put("adb", "root-direct")
+                .put("version", BuildConfig.VERSION_NAME);
         core.put("meta", meta);
         publishJson(core);
     }
@@ -564,7 +602,8 @@ public final class SnapshotCollector {
                     .put("derived", new JSONObject()).put("history", new JSONArray())
                     .put("voters", new JSONObject()).put("sessions", new JSONArray())
                     .put("thermal", new JSONObject())
-                    .put("meta", new JSONObject().put("interval", 3).put("adb", "root-direct"));
+                    .put("meta", new JSONObject().put("interval", 3)
+                            .put("adb", "root-direct").put("version", BuildConfig.VERSION_NAME));
         } catch (JSONException ignored) {}
         return o;
     }
@@ -574,7 +613,7 @@ public final class SnapshotCollector {
                 .format(new Date());
     }
 
-    /** 一条 su 脚本批量 cat 所有节点 + battery uevent，###N 分隔。 */
+    /** 一条 su 脚本批量读取 sysfs、uevent 与 thermal，###N 分隔。 */
     private String readBatch() {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < NODES.length; i++) {
@@ -585,58 +624,106 @@ public final class SnapshotCollector {
         sb.append("echo '###").append(NODES.length).append("'; cat '")
                 .append(BATTERY_UEVENT).append("' 2>/dev/null; ")
                 .append("echo '###").append(NODES.length + 1).append("'; cat '")
-                .append(USB_UEVENT).append("' 2>/dev/null");
+                .append(USB_UEVENT).append("' 2>/dev/null; ")
+                .append("echo '###").append(NODES.length + 2).append("'; tail -c 65536 '")
+                .append(THERMAL_DUMP)
+                .append("' 2>/dev/null | grep -a -F 'MONITOR-WIRELESS' | tail -n 3");
         return RootShell.exec(sb.toString(), 20);
     }
 
-    private String readVoteLogs() {
-        String fname = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 1", 10).trim();
-        if (!fname.matches("[A-Za-z0-9_.\\-]+")) return "";
-        lastLogFname = fname;
-        return RootShell.exec("tail -c 2097152 " + MCA_LOG_DIR + "/" + fname
-                + " | grep -a -E 'mca_vote'", 15);
+    private void updateLogsActive(JSONObject data) {
+        JSONObject battery = data.optJSONObject("battery");
+        JSONObject status = battery == null ? null : battery.optJSONObject("status");
+        String batteryStatus = status == null ? "" : status.optString("value", "");
+        JSONObject derived = data.optJSONObject("derived");
+        String source = derived == null ? "" : derived.optString("input_source", "");
+        double vrect = derived == null ? Double.NaN : derived.optDouble("vrect", Double.NaN);
+        boolean inputConnected = "wired".equals(source) || "wireless".equals(source)
+                || (derived != null && derived.optBoolean("wired_online", false))
+                || (Double.isFinite(vrect) && vrect > 0);
+        logsActive = "Charging".equalsIgnoreCase(batteryStatus) || inputConnected;
     }
 
-    private String readSessionLogs() {
-        String files = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 3", 10).trim();
-        if (files.isEmpty()) return "";
-        String pattern = "power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|FAST_CHARGE|fast chg success|set chg current|open path ibus|smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|strategy_wireless_get_charging_info|BPP drawload|rx_iout_limit|epp plus|EPP\\+|send_vout_range_request|set adapter voltage";
-        StringBuilder script = new StringBuilder();
-        String[] logFiles = files.split("\n");
-        if (logFiles.length > 0 && logFiles[0].matches("[A-Za-z0-9_.\\-]+")) {
-            lastLogFname = logFiles[0];
-        }
-        // ls -t 是最新在前；解析时按旧 -> 新拼接，保证会话时间线顺序正确
-        for (int i = logFiles.length - 1; i >= 0; i--) {
-            String f = logFiles[i].trim();
-            if (!f.matches("[A-Za-z0-9_.\\-]+")) continue;
-            script.append("tail -c 4194304 ").append(MCA_LOG_DIR).append('/').append(f)
-                    .append(" | grep -a -E '").append(pattern)
-                    .append("' | grep -v sysfs_show; ");
-        }
-        script.append("echo __SESS_OK__");
-        return RootShell.exec(script.toString(), 25);
+    private static final class LogBundle {
+        String vote = "";
+        String session = "";
+        String powerPath = "";
+        boolean voteOk;
+        boolean sessionOk;
+        boolean powerPathOk;
     }
 
-    /** 功率路径高频信号专用通道：只读最新文件 1MB，手机端 grep + tail 200 后返回。 */
-    private String readPowerPathLogs() {
-        String fname = RootShell.exec("ls -t " + MCA_LOG_DIR + " | head -n 1", 10).trim();
-        if (!fname.matches("[A-Za-z0-9_.\\-]+")) return "";
-        lastLogFname = fname;
-        String pattern = "power_good|usb online|real_type changed|"
-                + "sc8581_set_operation_mode|"
-                + "mca_quick_charge_update_work_mode_para|"
-                + "strategy_quickchg_map_ibus_to_fsw|"
-                + "cur_work_cp|"
-                + "strategy_buckchg_charge_limit|"
-                + "strategy_buckchg_update_charge_status|"
-                + "mca_quick_charge_regulation|"
-                + "mca_wireless_quick_charge_select_cur_work_mode|"
-                + "mca_wireless_quick_charge_select_max_ibat|"
-                + "mca_quick_charge_select_max_ibat:.*cur_stage .*cur_max .*cur_work_cp|"
-                + "mca_quick_charge_select_max_ibat:.*cur_max .*secure_cur .*channel_cur .*thermal_cur";
-        return RootShell.exec("tail -c 1048576 " + MCA_LOG_DIR + "/" + fname
-                + " | grep -a -E '" + pattern + "' | tail -n 200; echo __PP_OK__", 15);
+    private static String section(String raw, String begin, String end) {
+        int from = raw.indexOf(begin);
+        if (from < 0) return "";
+        from += begin.length();
+        if (from < raw.length() && raw.charAt(from) == '\n') from++;
+        int to = raw.indexOf(end, from);
+        return (to < 0 ? raw.substring(from) : raw.substring(from, to)).trim();
+    }
+
+    /**
+     * 一次 su 完成投票、最新会话与功率路径读取。
+     * 会话最多扫描最新两个轮转文件，按旧→新过滤后只返回最后一次 power_good_on
+     * 开始的事件；兼顾日志轮转边界与“只展示最新会话”。
+     */
+    private LogBundle readLogs() {
+        String grepArgs = "-e 'power_good' -e 'AUTHEN_FINISH' -e 'uuid_value' "
+                + "-e 'TX_ADAPTER' -e 'FAST_CHARGE' -e 'fast chg success' "
+                + "-e 'set chg current' -e 'open path ibus' "
+                + "-e 'smartchg_soc_limit_callback' "
+                + "-e 'strategy_wireless_get_qc_enable' "
+                + "-e 'strategy_wireless_get_charging_info' "
+                + "-e 'BPP drawload' -e 'rx_iout_limit' -e 'epp plus' "
+                + "-e 'EPP+' -e 'send_vout_range_request' -e 'set adapter voltage'";
+        // 全部是字面量；通用 mca_quick_charge_select_max_ibat 已覆盖原先两个 .* 分支。
+        String ppGrepArgs = "-e 'power_good' -e 'usb online' -e 'real_type changed' "
+                + "-e 'sc8581_set_operation_mode' "
+                + "-e 'mca_quick_charge_update_work_mode_para' "
+                + "-e 'strategy_quickchg_map_ibus_to_fsw' -e 'cur_work_cp' "
+                + "-e 'strategy_buckchg_charge_limit' "
+                + "-e 'strategy_buckchg_update_charge_status' "
+                + "-e 'mca_quick_charge_regulation' "
+                + "-e 'mca_wireless_quick_charge_select_cur_work_mode' "
+                + "-e 'mca_wireless_quick_charge_select_max_ibat' "
+                + "-e 'mca_quick_charge_select_max_ibat'";
+        String dir = MCA_LOG_DIR + "/";
+        String script = "set -- $(ls -t " + MCA_LOG_DIR + " 2>/dev/null | head -n 2); "
+                + "newest=$1; older=$2; "
+                + "echo __LOG_FILE__${newest}; "
+                + "echo __VOTE_BEGIN__; "
+                + "tail -c 2097152 " + dir + "${newest} 2>/dev/null "
+                + "| grep -a -F 'mca_vote'; echo __VOTE_END__; "
+                + "echo __SESSION_BEGIN__; "
+                + "session_new=\"$(tail -c 4194304 " + dir + "${newest} 2>/dev/null "
+                + "| grep -a -F " + grepArgs + " | grep -v -F 'sysfs_show')\"; "
+                + "if printf '%s\\n' \"${session_new}\" "
+                + "| grep -q -F 'wireless power_good_on'; then "
+                + "printf '%s\\n' \"${session_new}\"; else "
+                + "{ [ -n \"${older}\" ] && tail -c 4194304 " + dir + "${older} 2>/dev/null "
+                + "| grep -a -F " + grepArgs + " | grep -v -F 'sysfs_show'; "
+                + "printf '%s\\n' \"${session_new}\"; }; fi "
+                + "| awk '{all[++m]=$0} index($0,\"wireless power_good_on\")"
+                + "{n=0;seen=1} seen{line[++n]=$0} "
+                + "END{if(seen){for(i=1;i<=n;i++)print line[i]}"
+                + "else{for(i=1;i<=m;i++)print all[i]}}'; "
+                + "echo __SESSION_END__; "
+                + "echo __PP_BEGIN__; "
+                + "tail -c 1048576 " + dir + "${newest} 2>/dev/null "
+                + "| grep -a -F " + ppGrepArgs + " | tail -n 200; echo __PP_END__";
+        String raw = RootShell.exec(script, 25);
+        LogBundle out = new LogBundle();
+        if (raw.isEmpty()) return out;
+        Matcher fm = Pattern.compile("__LOG_FILE__([A-Za-z0-9_.\\-]+)").matcher(raw);
+        boolean fileOk = fm.find();
+        if (fileOk) lastLogFname = fm.group(1);
+        out.voteOk = fileOk && raw.contains("__VOTE_BEGIN__") && raw.contains("__VOTE_END__");
+        out.sessionOk = fileOk && raw.contains("__SESSION_BEGIN__") && raw.contains("__SESSION_END__");
+        out.powerPathOk = fileOk && raw.contains("__PP_BEGIN__") && raw.contains("__PP_END__");
+        out.vote = section(raw, "__VOTE_BEGIN__", "__VOTE_END__");
+        out.session = section(raw, "__SESSION_BEGIN__", "__SESSION_END__");
+        out.powerPath = section(raw, "__PP_BEGIN__", "__PP_END__");
+        return out;
     }
 
     private JSONObject build(String batch) throws JSONException {
@@ -645,6 +732,7 @@ public final class SnapshotCollector {
         JSONObject nodesObj = new JSONObject();
         JSONObject batteryRaw = new JSONObject();
         JSONObject usbRaw = new JSONObject();
+        String thermalRaw = "";
         for (String part : raw) {
             if (!part.startsWith("###")) continue;
             String num = part.substring(3).split("\\s", 2)[0];
@@ -657,6 +745,8 @@ public final class SnapshotCollector {
                 batteryRaw = parseUevent(body);
             } else if (i == NODES.length + 1) {
                 usbRaw = parseUevent(body);
+            } else if (i == NODES.length + 2) {
+                thermalRaw = body;
             }
         }
 
@@ -830,6 +920,8 @@ public final class SnapshotCollector {
         derived.put("wired_tel_log_time", telLogTime);
         derived.put("wired_tel_at", telAt == 0L ? JSONObject.NULL : telAt);
         derived.put("wired_usb_online", usbOnline);
+        // 每 3 秒读取的实时 CP 总线电流；用于日志未打印模式行时判定无线 Buck/CP。
+        putFinite(derived, "cp_ibus_total_ma", nodeNum(nodesObj.optJSONObject("ibus_total")));
         putFinite(derived, "battery_power_w", battCurMa * battVolMv / 1e6);
         putFinite(derived, "batt_current_ma", battCurMa);
         putFinite(derived, "batt_voltage_mv", battVolMv);
@@ -868,14 +960,16 @@ public final class SnapshotCollector {
                 .put("nodes", nodeList)
                 .put("battery", battery)
                 .put("derived", derived)
+                .put("thermal", parseThermalDump(thermalRaw))
                 .put("meta", new JSONObject()
                         .put("interval", 3)
                         .put("fast_interval", 3)
-                        .put("logs_interval", 10)
+                        .put("logs_interval", logsIntervalSeconds())
                         .put("logs_updated_at", lastLogsUpdatedAt)
                         .put("logs_stale", logsStale)
                         .put("power_path_logs_stale", powerPathLogsStale)
-                        .put("adb", "root-direct"));
+                        .put("adb", "root-direct")
+                        .put("version", BuildConfig.VERSION_NAME));
     }
 
     private static double optNum(JSONObject o, String key) {

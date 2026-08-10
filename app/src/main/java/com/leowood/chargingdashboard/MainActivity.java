@@ -25,6 +25,8 @@ public class MainActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     /** App 在前台时才采集，后台/锁屏停止 root 读写，避免耗电。 */
     private volatile boolean active = true;
+    /** onCreate 已安排首次采集；跳过首次 onResume 的重复立即采集。 */
+    private boolean firstResume = true;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -47,17 +49,17 @@ public class MainActivity extends Activity {
             if (!active) return;
             collector.collectFast();
             ui.post(() -> {
-                if (webView != null) webView.evaluateJavascript(
+                if (active && webView != null) webView.evaluateJavascript(
                         "window.__onSnapshot && window.__onSnapshot();", null);
             });
         }, 0, 3, TimeUnit.SECONDS);
-        // 慢速日志：投票/会话/EPP 每 20 秒
+        // 慢速日志：充电/连接时约 10 秒，未连接时约 60 秒
         slowScheduler.scheduleWithFixedDelay(() -> {
-            if (!active) return;
+            if (!active || !collector.shouldCollectLogs()) return;
             collector.collectLogs();
             // 日志完成后立即通知页面刷新，不等下一轮快速采集
             ui.post(() -> {
-                if (webView != null) webView.evaluateJavascript(
+                if (active && webView != null) webView.evaluateJavascript(
                         "window.__onSnapshot && window.__onSnapshot();", null);
             });
         }, 2, 10, TimeUnit.SECONDS);
@@ -66,7 +68,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         active = false;
-        if (webView != null) webView.onPause();
+        if (webView != null) {
+            webView.onPause();
+            webView.pauseTimers();
+        }
         super.onPause();
     }
 
@@ -74,21 +79,28 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         active = true;
-        if (webView != null) webView.onResume();
+        if (webView != null) {
+            webView.onResume();
+            webView.resumeTimers();
+        }
+        if (firstResume) {
+            firstResume = false;
+            return;
+        }
         // 回到前台立即采集一次，不等下一个调度周期
         fastScheduler.execute(() -> {
             if (!active) return;
             collector.collectFast();
             ui.post(() -> {
-                if (webView != null) webView.evaluateJavascript(
+                if (active && webView != null) webView.evaluateJavascript(
                         "window.__onSnapshot && window.__onSnapshot();", null);
             });
         });
         slowScheduler.execute(() -> {
-            if (!active) return;
+            if (!active || !collector.shouldCollectLogs()) return;
             collector.collectLogs();
             ui.post(() -> {
-                if (webView != null) webView.evaluateJavascript(
+                if (active && webView != null) webView.evaluateJavascript(
                         "window.__onSnapshot && window.__onSnapshot();", null);
             });
         });
@@ -98,6 +110,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         fastScheduler.shutdownNow();
         slowScheduler.shutdownNow();
+        ui.removeCallbacksAndMessages(null);
         if (webView != null) {
             webView.destroy();
             webView = null;
