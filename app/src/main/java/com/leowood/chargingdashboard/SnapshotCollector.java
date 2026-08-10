@@ -47,7 +47,8 @@ public final class SnapshotCollector {
     private static final String USB_UEVENT = "/sys/class/power_supply/usb/uevent";
     private static final int HISTORY_MAX = 180;
     // 实机快充切换测试：Buck 时为 0mA，CP 预启动会短暂出现 3~5mA，
-    // 真正承载后直接跃升至 400mA 以上。
+    // 真正承载后直接跃升至 400mA 以上。CP 稳态也可能瞬时读到 0，
+    // 因此低电流必须与当前无线会话的 operation mode/work_mode 融合判定。
     private static final double CP_IBUS_BUCK_MAX_MA = 20.0;
     private static final double CP_IBUS_ACTIVE_MIN_MA = 100.0;
     private static final int SESSION_MAX = 1;
@@ -59,6 +60,8 @@ public final class SnapshotCollector {
     /** 慢速日志结果由 collectLogs 独占写入、collectFast 只读，volatile 保证可见性。 */
     private volatile JSONObject lastVoters = new JSONObject();
     private volatile JSONArray lastSessions = new JSONArray();
+    /** 最近一次有效热控快照；空闲时 thermal.dump 尾部无无线行仍可立即显示。 */
+    private volatile JSONObject lastThermal = new JSONObject();
     private volatile String lastEpp = null;
     /** 驱动实测无线输入限流（wireless loop icl），比投票最小值推算更可信。 */
     private volatile Integer lastWlsIcl = null;
@@ -467,8 +470,9 @@ public final class SnapshotCollector {
                         .put("actual_limit_source",
                                 lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
             }
-            // 活跃无线充电优先采用 3 秒实时 CP 支路电流；不要把预启动的
-            // 3~5mA 当作当前主功率路径已经切到 CP。
+            // 实时 CP 支路电流与当前会话硬件模式融合：预启动 3~5mA 不能
+            // 单独证明 CP，但已确认 operation mode/work_mode 后，瞬时 0mA
+            // 也不能推翻当前 CP 路径。
             JSONObject derived = core.optJSONObject("derived");
             double cpIbus = derived == null ? Double.NaN
                     : derived.optDouble("cp_ibus_total_ma", Double.NaN);
@@ -476,11 +480,16 @@ public final class SnapshotCollector {
                     && "wireless".equals(derived.optString("input_source"))
                     && Double.isFinite(cpIbus);
             if (liveWirelessConnected) {
-                String cpState = classifyWirelessCpIbus(cpIbus);
+                String liveCpState = classifyWirelessCpIbus(cpIbus);
+                String cpState = resolveWirelessCpState(
+                        cpIbus, lastCpMode, lastCpWorkMode);
                 boolean cpActive = "cp".equals(cpState);
                 buck.put("cp_state", cpState);
                 buck.put("cp_active", cpActive);
-                buck.put("cp_state_source", "sysfs_cp_ibus_total");
+                buck.put("cp_state_source",
+                        !liveCpState.equals(cpState)
+                                ? "sysfs_cp_ibus_total+session_cp_mode"
+                                : "sysfs_cp_ibus_total");
                 buck.put("cp_ibus_total_ma", cpIbus);
                 if (cpActive && lastCpWorkMode != null) {
                     buck.put("cp_ratio", lastCpWorkMode);
@@ -623,7 +632,11 @@ public final class SnapshotCollector {
                 .append(USB_UEVENT).append("' 2>/dev/null; ")
                 .append("echo '###").append(NODES.length + 2).append("'; tail -c 65536 '")
                 .append(THERMAL_DUMP)
-                .append("' 2>/dev/null | grep -a -F 'MONITOR-WIRELESS' | tail -n 3");
+                .append("' 2>/dev/null | awk '")
+                .append("/VIRTUAL-SENSOR-FORMULA/ { any=$0 } ")
+                .append("/MONITOR-WIRELESS/ { wls=$0 } ")
+                .append("END { if (wls != \"\") print wls; ")
+                .append("if (any != \"\" && any != wls) print any }'");
         return RootShell.exec(sb.toString(), 20);
     }
 
@@ -956,13 +969,20 @@ public final class SnapshotCollector {
             break;
         }
 
+        JSONObject thermal = parseThermalDump(thermalRaw);
+        if (!thermal.isNull("virtual_temp")) {
+            lastThermal = new JSONObject(thermal.toString());
+        } else if (!lastThermal.isNull("virtual_temp")) {
+            thermal = new JSONObject(lastThermal.toString());
+        }
+
         return new JSONObject()
                 .put("ts", System.currentTimeMillis() / 1000.0)
                 .put("iso", isoNow())
                 .put("nodes", nodeList)
                 .put("battery", battery)
                 .put("derived", derived)
-                .put("thermal", parseThermalDump(thermalRaw))
+                .put("thermal", thermal)
                 .put("meta", new JSONObject()
                         .put("interval", 3)
                         .put("fast_interval", 3)
@@ -991,6 +1011,15 @@ public final class SnapshotCollector {
         if (current >= CP_IBUS_ACTIVE_MIN_MA) return "cp";
         if (current <= CP_IBUS_BUCK_MAX_MA) return "buck";
         return "transition";
+    }
+
+    private static String resolveWirelessCpState(
+            double cpIbusMa, Integer cpMode, Integer cpWorkMode) {
+        String live = classifyWirelessCpIbus(cpIbusMa);
+        boolean sessionCp = (cpMode != null && cpMode > 0)
+                || (cpMode == null && cpWorkMode != null
+                && (cpWorkMode == 1 || cpWorkMode == 2 || cpWorkMode == 4));
+        return "buck".equals(live) && sessionCp ? "cp" : live;
     }
 
     private static JSONObject parseUevent(String text) throws JSONException {
@@ -1220,6 +1249,9 @@ public final class SnapshotCollector {
     private JSONArray parseSessions(String text) throws JSONException {
         JSONArray sessions = new JSONArray();
         JSONObject cur = null;
+        JSONObject openGroup = null;
+        int openFirstIbus = 0;
+        int openCount = 0;
         for (String line : text.split("\n")) {
             String kind = null, detail = "";
             if (line.contains("wireless power_good_off")) kind = "off";
@@ -1250,6 +1282,8 @@ public final class SnapshotCollector {
             }
             if (kind == null) continue;
             if (kind.equals("on")) {
+                openGroup = null;
+                openCount = 0;
                 cur = new JSONObject().put("start", shiftLogTime(timeOf(line))).put("ended", false)
                         .put("events", new JSONArray())
                         .put("uuid", JSONObject.NULL).put("tx_adapter", JSONObject.NULL)
@@ -1261,6 +1295,10 @@ public final class SnapshotCollector {
             }
             if (cur == null) continue;
             JSONArray ev = cur.getJSONArray("events");
+            if (!kind.equals("open")) {
+                openGroup = null;
+                openCount = 0;
+            }
             if (kind.equals("on")) {
                 ev.put(event(line, "on", "充电板接入", ""));
             } else if (kind.equals("off")) {
@@ -1287,7 +1325,17 @@ public final class SnapshotCollector {
                 cur.put("final_limit_ma", v);
             } else if (kind.equals("open")) {
                 cur.put("opens", cur.optInt("opens") + 1);
-                ev.put(event(line, "open", "打开快充路径", detail));
+                int ibus = Integer.parseInt(detail);
+                if (openGroup == null) {
+                    openFirstIbus = ibus;
+                    openCount = 1;
+                    openGroup = event(line, "open", "CP 建链", "ibus " + ibus + "mA");
+                    ev.put(openGroup);
+                } else {
+                    openCount++;
+                    openGroup.put("detail", "ibus " + openFirstIbus + "→" + ibus
+                            + "mA · " + openCount + "次");
+                }
             } else if (kind.equals("smart")) {
                 cur.put("smartendura", true);
                 ev.put(event(line, "smart", "SmartEndura 介入", ""));
@@ -1825,6 +1873,8 @@ public final class SnapshotCollector {
     }
     private static final Pattern THERMAL_WLS_RE = Pattern.compile(
             "\\[([A-Z0-9\\-]*MONITOR-WIRELESS)\\]\\[VIRTUAL-SENSOR-FORMULA (\\d+)\\]");
+    private static final Pattern THERMAL_ANY_RE = Pattern.compile(
+            "\\[([A-Z0-9\\-]+)\\]\\[VIRTUAL-SENSOR-FORMULA (\\d+)\\]");
     private static final Pattern THERMAL_TARGET_RE = Pattern.compile("\\[wireless_charge (\\d+)\\]");
 
     private JSONObject parseThermalDump(String text) throws JSONException {
@@ -1833,12 +1883,33 @@ public final class SnapshotCollector {
                 .put("target", JSONObject.NULL);
         for (String line : text.split("\n")) {
             Matcher m = THERMAL_WLS_RE.matcher(line);
-            if (!m.find()) continue;
-            r.put("scene", THERMAL_SCENES.getOrDefault(m.group(1), m.group(1)));
-            r.put("virtual_temp", Integer.parseInt(m.group(2)) / 1000.0);
-            Matcher t = THERMAL_TARGET_RE.matcher(line);
-            if (t.find()) r.put("target", Integer.parseInt(t.group(1)));
+            if (m.find()) {
+                r.put("scene", THERMAL_SCENES.getOrDefault(m.group(1), m.group(1)));
+                r.put("virtual_temp", Integer.parseInt(m.group(2)) / 1000.0);
+                Matcher t = THERMAL_TARGET_RE.matcher(line);
+                r.put("target", t.find() ? Integer.parseInt(t.group(1)) : JSONObject.NULL);
+                continue;
+            }
+            Matcher any = THERMAL_ANY_RE.matcher(line);
+            if (any.find()) {
+                r.put("scene", thermalSceneForSegment(any.group(1)));
+                r.put("virtual_temp", Integer.parseInt(any.group(2)) / 1000.0);
+                r.put("target", JSONObject.NULL);
+            }
         }
         return r;
+    }
+
+    private static String thermalSceneForSegment(String segment) {
+        final String suffix = "-MONITOR-WIRELESS";
+        for (String key : THERMAL_SCENES.keySet()) {
+            if (!key.endsWith(suffix)) continue;
+            String prefix = key.substring(0, key.length() - suffix.length());
+            if (!prefix.isEmpty()
+                    && (segment.equals(prefix) || segment.startsWith(prefix + "-"))) {
+                return THERMAL_SCENES.get(key);
+            }
+        }
+        return THERMAL_SCENES.get("MONITOR-WIRELESS");
     }
 }
