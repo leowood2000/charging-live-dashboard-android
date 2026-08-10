@@ -238,8 +238,8 @@ public final class SnapshotCollector {
                     if (!wm.isNull("rx_iout_limit")) {
                         lastRxIoutLimit = wm.getInt("rx_iout_limit");
                         rxIoutLimitCaptured = true;
-                        lastRxIoutLimitAt = System.currentTimeMillis();
                         lastRxIoutLimitLogTime = wm.optString("rx_iout_limit_time", "");
+                        lastRxIoutLimitAt = logEventAt(lastRxIoutLimitLogTime);
                     }
                     WlsIcl icl = parseWlsIcl(wtail);
                     if (icl != null) {
@@ -469,23 +469,13 @@ public final class SnapshotCollector {
             }
             // 活跃无线充电优先采用 3 秒实时 CP 支路电流；不要把预启动的
             // 3~5mA 当作当前主功率路径已经切到 CP。
-            JSONObject battery = core.optJSONObject("battery");
-            JSONObject status = battery == null ? null : battery.optJSONObject("status");
-            String battStatus = status == null ? "" : status.optString("value", "");
             JSONObject derived = core.optJSONObject("derived");
             double cpIbus = derived == null ? Double.NaN
                     : derived.optDouble("cp_ibus_total_ma", Double.NaN);
-            double inputIout = derived == null ? Double.NaN
-                    : derived.optDouble("input_current_ma", Double.NaN);
-            double battCurrent = derived == null ? Double.NaN
-                    : derived.optDouble("batt_current_ma", Double.NaN);
-            boolean liveWirelessCharging = derived != null
+            boolean liveWirelessConnected = derived != null
                     && "wireless".equals(derived.optString("input_source"))
-                    && "Charging".equalsIgnoreCase(battStatus)
-                    && Double.isFinite(inputIout) && inputIout > 0
-                    && Double.isFinite(battCurrent) && battCurrent > 0
                     && Double.isFinite(cpIbus);
-            if (liveWirelessCharging) {
+            if (liveWirelessConnected) {
                 String cpState = classifyWirelessCpIbus(cpIbus);
                 boolean cpActive = "cp".equals(cpState);
                 buck.put("cp_state", cpState);
@@ -797,6 +787,10 @@ public final class SnapshotCollector {
         boolean usbKnownOff = "0".equals(usbRaw.optString("ONLINE", ""));
         double usbVbusMv = optNum(usbRaw, "VOLTAGE_NOW") / 1000.0;
         double usbIbusMa = optNum(usbRaw, "CURRENT_NOW") / 1000.0;
+        // 拔线后 CP/Buck 日志会留在缓存；只有实时 USB online，或 VBUS 明确
+        // 高于 1V，才允许历史策略遥测证明“有线仍连接”。
+        boolean wiredPresent = usbOnline
+                || (Double.isFinite(usbVbusMv) && usbVbusMv > 1000.0);
 
         JSONObject cpTel = lastWiredCpTel;
         JSONObject buckTel = lastWiredBuckTel;
@@ -807,8 +801,8 @@ public final class SnapshotCollector {
         } else if ("buck".equals(wstate)) {
             chosen = buckTel != null ? buckTel : cpTel;
         } else if (cpTel != null && buckTel != null) {
-            chosen = cpTel.optString("log_time", "").compareTo(
-                    buckTel.optString("log_time", "")) >= 0 ? cpTel : buckTel;
+            chosen = cpTel.optLong("at", 0L) >= buckTel.optLong("at", 0L)
+                    ? cpTel : buckTel;
         } else {
             chosen = cpTel != null ? cpTel : buckTel;
         }
@@ -842,7 +836,7 @@ public final class SnapshotCollector {
         double rtIbusMa = Double.NaN;
         String rtSource = null;
         long rtAt = 0L;
-        if ("cp".equals(wstate)) {
+        if ("cp".equals(wstate) && wiredPresent) {
             double ibusTotal = nodeNum(nodesObj.optJSONObject("ibus_total"));
             if (Double.isFinite(ibusTotal)) {
                 double vb = Double.isFinite(telVbusMv) ? telVbusMv : usbVbusMv;
@@ -861,13 +855,15 @@ public final class SnapshotCollector {
             rtSource = "usb_uevent";
             rtAt = nowMs;
         }
-        if (rtSource == null && Double.isFinite(telVbusMv) && Double.isFinite(telIbusMa)) {
+        if (rtSource == null && wiredPresent
+                && Double.isFinite(telVbusMv) && Double.isFinite(telIbusMa)) {
             rtVbusMv = telVbusMv;
             rtIbusMa = telIbusMa;
             rtSource = telSource;
             rtAt = telAt;
         }
-        boolean wiredOnline = Double.isFinite(rtVbusMv) && Double.isFinite(rtIbusMa);
+        boolean wiredOnline = wiredPresent && Double.isFinite(rtVbusMv)
+                && rtVbusMv > 1000.0 && Double.isFinite(rtIbusMa);
         // mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
         double wiredPower = wiredOnline ? rtVbusMv * rtIbusMa / 1e6 : Double.NaN;
 
@@ -1016,7 +1012,8 @@ public final class SnapshotCollector {
     private long absLogMs(String fname, String hms) {
         java.time.LocalDate d = java.time.LocalDate.now();
         Matcher fm = LOG_FILE_RE.matcher(fname == null ? "" : fname);
-        if (fm.find()) {
+        boolean hasFileTime = fm.find();
+        if (hasFileTime) {
             d = java.time.LocalDate.of(d.getYear(),
                     Integer.parseInt(fm.group(1)), Integer.parseInt(fm.group(2)));
         }
@@ -1025,12 +1022,26 @@ public final class SnapshotCollector {
         String[] p = hms.split(":");
         if (p.length < 4) return base;
         try {
-            return base + Long.parseLong(p[0]) * 3600000L
+            long eventMs = Long.parseLong(p[0]) * 3600000L
                     + Long.parseLong(p[1]) * 60000L
                     + Long.parseLong(p[2]) * 1000L + Long.parseLong(p[3]);
+            if (hasFileTime) {
+                long fileStartMs = Integer.parseInt(fm.group(3)) * 3600000L
+                        + Integer.parseInt(fm.group(4)) * 60000L;
+                if (eventMs + 12L * 3600000L < fileStartMs) {
+                    base += 24L * 3600000L;
+                }
+            }
+            return base + eventMs;
         } catch (NumberFormatException e) {
             return base;
         }
+    }
+
+    /** 日志事件优先使用日志本身的绝对时间；无时间戳时才回退采集时刻。 */
+    private long logEventAt(String logTime) {
+        return logTime == null || logTime.isEmpty()
+                ? System.currentTimeMillis() : absLogMs(lastLogFname, logTime);
     }
 
     /** sysfs 节点数值：非法/空返回 NaN。 */
@@ -1353,7 +1364,7 @@ public final class SnapshotCollector {
             long ms = raw.isEmpty() ? 0L : absLogMs(lastLogFname, logTime);
             last = new WlsIcl(Integer.parseInt(m.group(1)),
                     Integer.parseInt(m.group(2)),
-                    System.currentTimeMillis(), logTime, ms);
+                    ms > 0L ? ms : System.currentTimeMillis(), logTime, ms);
         }
         return last;
     }
@@ -1420,14 +1431,15 @@ public final class SnapshotCollector {
             Matcher m = CUR_DECISION_IN_RE.matcher(line);
             if (m.find()) {
                 Matcher tm = VOTE_TIME_RE.matcher(line);
+                String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
                 inputs = new JSONObject()
                         .put("channel_cur", Integer.parseInt(m.group(1)))
                         .put("temp_max_cur", Integer.parseInt(m.group(2)))
                         .put("tx_adapter_max", Integer.parseInt(m.group(3)))
                         .put("sw_qc_ichg", Integer.parseInt(m.group(4)))
                         .put("sw_thermal_ichg", Integer.parseInt(m.group(5)))
-                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
-                        .put("at", System.currentTimeMillis());
+                        .put("log_time", logTime)
+                        .put("at", logEventAt(logTime));
                 continue;
             }
             Matcher m2 = CUR_DECISION_FINAL_RE.matcher(line);
@@ -1457,6 +1469,7 @@ public final class SnapshotCollector {
             Matcher m = WIRED_BUCK_TELEMETRY_RE.matcher(line);
             if (!m.find()) continue;
             Matcher tm = VOTE_TIME_RE.matcher(line);
+            String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
             last = new JSONObject()
                     .put("vbus_mv", Integer.parseInt(m.group(7)) / 1000.0)
                     .put("ibus_ma", Integer.parseInt(m.group(8)) / 1000.0)
@@ -1464,8 +1477,8 @@ public final class SnapshotCollector {
                     .put("chg_en_client", m.group(4))
                     .put("chg_type", Integer.parseInt(m.group(5)))
                     .put("source", "buckchg_telemetry")
-                    .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
-                    .put("at", System.currentTimeMillis());
+                    .put("log_time", logTime)
+                    .put("at", logEventAt(logTime));
         }
         return last;
     }
@@ -1477,14 +1490,15 @@ public final class SnapshotCollector {
             Matcher m = WIRED_CP_TELEMETRY_RE.matcher(line);
             if (!m.find()) continue;
             Matcher tm = VOTE_TIME_RE.matcher(line);
+            String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
             last = new JSONObject()
                     .put("vbus_mv", Integer.parseInt(m.group(3)))
                     .put("ibus_ma", Integer.parseInt(m.group(10)))
                     .put("chg_en", 1)
                     .put("chg_en_client", "quick_charge")
                     .put("source", "quick_charge_regulation")
-                    .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
-                    .put("at", System.currentTimeMillis());
+                    .put("log_time", logTime)
+                    .put("at", logEventAt(logTime));
         }
         return last;
     }
@@ -1695,24 +1709,26 @@ public final class SnapshotCollector {
             Matcher mf = WIRED_FINAL_CUR_MAX_RE.matcher(line);
             if (mf.find() && dCtx) {
                 Matcher tm = VOTE_TIME_RE.matcher(line);
+                String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
                 dCurMax = new JSONObject()
                         .put("cur_max", Integer.parseInt(mf.group(1)))
                         .put("secure_cur", Integer.parseInt(mf.group(2)))
                         .put("channel_cur", Integer.parseInt(mf.group(3)))
                         .put("thermal_cur", Integer.parseInt(mf.group(4)))
-                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
-                        .put("at", System.currentTimeMillis());
+                        .put("log_time", logTime)
+                        .put("at", logEventAt(logTime));
                 continue;
             }
             Matcher ms = WIRED_STAGE_CUR_MAX_RE.matcher(line);
             if (ms.find() && dCtx) {
                 Matcher tm = VOTE_TIME_RE.matcher(line);
+                String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
                 dStageCurMax = new JSONObject()
                         .put("stage", Integer.parseInt(ms.group(1)))
                         .put("cur_max", Integer.parseInt(ms.group(2)))
                         .put("delta", Integer.parseInt(ms.group(3)))
-                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
-                        .put("at", System.currentTimeMillis());
+                        .put("log_time", logTime)
+                        .put("at", logEventAt(logTime));
                 dCurCp = true;
                 dCurCpSeq = seq;
                 continue;
@@ -1729,14 +1745,15 @@ public final class SnapshotCollector {
             m = CUR_DECISION_IN_RE.matcher(line);
             if (m.find()) {
                 Matcher tm = VOTE_TIME_RE.matcher(line);
+                String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
                 wInputs = new JSONObject()
                         .put("channel_cur", Integer.parseInt(m.group(1)))
                         .put("temp_max_cur", Integer.parseInt(m.group(2)))
                         .put("tx_adapter_max", Integer.parseInt(m.group(3)))
                         .put("sw_qc_ichg", Integer.parseInt(m.group(4)))
                         .put("sw_thermal_ichg", Integer.parseInt(m.group(5)))
-                        .put("log_time", tm.find() ? shiftLogTime(tm.group(1)) : "")
-                        .put("at", System.currentTimeMillis());
+                        .put("log_time", logTime)
+                        .put("at", logEventAt(logTime));
                 continue;
             }
             Matcher m2 = CUR_DECISION_FINAL_RE.matcher(line);
