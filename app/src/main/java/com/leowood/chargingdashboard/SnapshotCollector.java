@@ -52,7 +52,7 @@ public final class SnapshotCollector {
     private static final double CP_IBUS_BUCK_MAX_MA = 20.0;
     private static final double CP_IBUS_ACTIVE_MIN_MA = 100.0;
     private static final int SESSION_MAX = 1;
-    private static final int SESSION_EVENT_MAX = 100;
+    private static final int SESSION_EVENT_MAX = 40;
 
     private final Deque<JSONObject> history = new ArrayDeque<>();
     /** 无锁读取的快照字符串；首次即返回 loading 状态，避免启动黑屏等待采集锁。 */
@@ -803,11 +803,12 @@ public final class SnapshotCollector {
 
     /**
      * 一次 su 完成投票、最新会话与功率路径读取。
-     * 会话最多扫描最新两个轮转文件，按旧→新过滤后只返回最后一次 power_good_on
-     * 开始的事件；兼顾日志轮转边界与“只展示最新会话”。
+     * 会话最多扫描最新两个轮转文件，按旧→新过滤后由解析器按无线/有线边界
+     * 选择最后一个会话；兼顾日志轮转边界与“只展示最新会话”。
      */
     private LogBundle readLogs() {
-        String grepArgs = "-e 'power_good' -e 'AUTHEN_FINISH' -e 'uuid_value' "
+        String grepArgs = "-e 'power_good' -e 'usb online' -e 'real_type changed' "
+                + "-e 'AUTHEN_FINISH' -e 'uuid_value' "
                 + "-e 'TX_ADAPTER' -e 'FAST_CHARGE' -e 'fast chg success' "
                 + "-e 'set chg current' -e 'open path ibus' "
                 + "-e 'smartchg_soc_limit_callback' "
@@ -834,18 +835,10 @@ public final class SnapshotCollector {
                 + "tail -c 2097152 " + dir + "${newest} 2>/dev/null "
                 + "| grep -a -F 'mca_vote'; echo __VOTE_END__; "
                 + "echo __SESSION_BEGIN__; "
-                + "session_new=\"$(tail -c 4194304 " + dir + "${newest} 2>/dev/null "
-                + "| grep -a -F " + grepArgs + " | grep -v -F 'sysfs_show')\"; "
-                + "if printf '%s\\n' \"${session_new}\" "
-                + "| grep -q -F 'wireless power_good_on'; then "
-                + "printf '%s\\n' \"${session_new}\"; else "
                 + "{ [ -n \"${older}\" ] && tail -c 4194304 " + dir + "${older} 2>/dev/null "
                 + "| grep -a -F " + grepArgs + " | grep -v -F 'sysfs_show'; "
-                + "printf '%s\\n' \"${session_new}\"; }; fi "
-                + "| awk '{all[++m]=$0} index($0,\"wireless power_good_on\")"
-                + "{n=0;seen=1} seen{line[++n]=$0} "
-                + "END{if(seen){for(i=1;i<=n;i++)print line[i]}"
-                + "else{for(i=1;i<=m;i++)print all[i]}}'; "
+                + "tail -c 4194304 " + dir + "${newest} 2>/dev/null "
+                + "| grep -a -F " + grepArgs + " | grep -v -F 'sysfs_show'; }; "
                 + "echo __SESSION_END__; "
                 + "echo __PP_BEGIN__; "
                 + "tail -c 1048576 " + dir + "${newest} 2>/dev/null "
@@ -1414,17 +1407,23 @@ public final class SnapshotCollector {
     private static final Pattern TX_RE = Pattern.compile("POWER_SUPPLY_TX_ADAPTER=(\\d+)");
     private static final Pattern ICHG_RE = Pattern.compile("set chg current (\\d+)");
     private static final Pattern OPEN_RE = Pattern.compile("open path ibus (\\d+)");
+    private static final Pattern REAL_TYPE_OFF_RE = Pattern.compile("real_type changed: \\d+ => 0");
 
     private JSONArray parseSessions(String text) throws JSONException {
         JSONArray sessions = new JSONArray();
         JSONObject cur = null;
         JSONObject openGroup = null;
+        JSONObject ichgGroup = null;
         int openFirstIbus = 0;
         int openCount = 0;
+        int ichgFirstMa = 0;
+        int ichgCount = 0;
         for (String line : text.split("\n")) {
             String kind = null, detail = "";
             if (line.contains("wireless power_good_off")) kind = "off";
             else if (line.contains("wireless power_good_on")) kind = "on";
+            else if (line.contains("usb online: 0") || REAL_TYPE_OFF_RE.matcher(line).find()) kind = "wired_off";
+            else if (line.contains("usb online: 1")) kind = "wired_on";
             else if (line.contains("RX_INT_AUTHEN_FINISH")) kind = "auth";
             else {
                 Matcher u = UUID_RE.matcher(line);
@@ -1450,10 +1449,17 @@ public final class SnapshotCollector {
                 }
             }
             if (kind == null) continue;
-            if (kind.equals("on")) {
+            if (kind.equals("on") || kind.equals("wired_on")) {
+                String source = kind.equals("wired_on") ? "wired" : "wireless";
+                if (cur != null && !cur.optBoolean("ended")
+                        && source.equals(cur.optString("source"))) continue;
+                if (cur != null && !cur.optBoolean("ended")) cur.put("ended", true);
                 openGroup = null;
                 openCount = 0;
+                ichgGroup = null;
+                ichgCount = 0;
                 cur = new JSONObject().put("start", shiftLogTime(timeOf(line))).put("ended", false)
+                        .put("source", source)
                         .put("events", new JSONArray())
                         .put("uuid", JSONObject.NULL).put("tx_adapter", JSONObject.NULL)
                         .put("fc_flag", JSONObject.NULL).put("opens", 0)
@@ -1468,11 +1474,22 @@ public final class SnapshotCollector {
                 openGroup = null;
                 openCount = 0;
             }
+            if (!kind.equals("ichg")) {
+                ichgGroup = null;
+                ichgCount = 0;
+            }
             if (kind.equals("on")) {
-                ev.put(event(line, "on", "充电板接入", ""));
-            } else if (kind.equals("off")) {
+                ev.put(event(line, "on", "无线充电板接入", ""));
+            } else if (kind.equals("wired_on")) {
+                ev.put(event(line, "wired_on", "有线充电接入", ""));
+            } else if (kind.equals("off") || kind.equals("wired_off")) {
+                String source = cur.optString("source");
+                boolean matches = (kind.equals("off") && "wireless".equals(source))
+                        || (kind.equals("wired_off") && "wired".equals(source));
+                if (!matches) continue;
                 cur.put("ended", true);
-                ev.put(event(line, "off", "充电板移除", ""));
+                ev.put(event(line, kind, "wired".equals(source) ? "有线充电移除" : "无线充电板移除", ""));
+                cur = null;
             } else if (kind.equals("auth")) {
                 ev.put(event(line, "auth", "私有协议认证完成", ""));
             } else if (kind.equals("uuid")) {
@@ -1487,8 +1504,16 @@ public final class SnapshotCollector {
                 cur.put("fc_flag", detail);
                 ev.put(event(line, "fcflag", "快充成功标志", detail));
             } else if (kind.equals("ichg")) {
-                ev.put(event(line, "ichg", "设置充电电流", detail));
                 int v = Integer.parseInt(detail);
+                if (ichgGroup == null) {
+                    ichgFirstMa = v;
+                    ichgCount = 1;
+                    ichgGroup = event(line, "ichg", "设置充电电流", v + "mA");
+                    ev.put(ichgGroup);
+                } else {
+                    ichgCount++;
+                    ichgGroup.put("detail", ichgFirstMa + "→" + v + "mA · " + ichgCount + "次");
+                }
                 if (cur.isNull("peak_limit_ma") || v > cur.optInt("peak_limit_ma"))
                     cur.put("peak_limit_ma", v);
                 cur.put("final_limit_ma", v);

@@ -2,7 +2,13 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.19（versionCode 66）**。
+当前版本：**v0.11.20（versionCode 67）**。
+
+## v0.11.20 重点改进
+
+- 会话档案同时识别无线 `power_good_on/off` 和有线 `USB ONLINE=1/0` 边界；有线充电不再沿用旧无线会话。
+- 断开后立即封口当前会话，连续“设置充电电流”合并为首值→末值和次数，避免会话卡无限变长。
+- 会话卡明确标注来源（有线/无线），并覆盖有线 HVDCP/PD 等新会话。
 
 Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/charging-live-dashboard)。两版的数据语义保持一致。
 
