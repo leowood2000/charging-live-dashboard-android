@@ -35,4 +35,24 @@ final class InputSourceResolver {
         return "wireless".equals(inputSource)
                 || Double.isFinite(voutMv) && voutMv > 1000.0;
     }
+
+    static String resolveWiredInputSource(String wiredState,
+                                          double cpIbusMa,
+                                          double usbIbusMa,
+                                          boolean usbOnline,
+                                          Boolean chargingEnabled,
+                                          double batteryCurrentMa) {
+        boolean cpValid = Double.isFinite(cpIbusMa);
+        boolean stopped = Boolean.FALSE.equals(chargingEnabled)
+                && Double.isFinite(batteryCurrentMa)
+                && Math.abs(batteryCurrentMa) <= 300.0;
+        boolean cpIdleWhileStopped = stopped && cpValid && Math.abs(cpIbusMa) <= 50.0;
+        if ("cp".equals(wiredState) && cpValid && !cpIdleWhileStopped) {
+            return "cp_ibus_total";
+        }
+        if (usbOnline && Double.isFinite(usbIbusMa)) {
+            return "usb_uevent";
+        }
+        return "cp".equals(wiredState) && cpValid ? "cp_ibus_total" : null;
+    }
 }

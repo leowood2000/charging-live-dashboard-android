@@ -2,9 +2,15 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.16（versionCode 63）**。
+当前版本：**v0.11.17（versionCode 64）**。
 
 Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/charging-live-dashboard)。两版的数据语义保持一致。
+
+## v0.11.17 重点改进
+
+- 修复有线充满停充后仍显示 `5mA · CP ibus_total` 的语义问题：CP 总线近空闲且 `chg_enable=OFF`、电池电流接近 0 时，输入主测量切换为 USB `CURRENT_NOW`。
+- 页面同时显示“外部系统输入”和独立“CP支路电流”，明确区分手机系统耗电与电池充电电流。
+- 正常 CP 充电或停充但 CP 仍有明显电流时，继续保留 `CP ibus_total` 为主输入。
 
 ## v0.11.16 重点改进
 
@@ -64,7 +70,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 
 ## 安装
 
-1. 从 [Releases](https://github.com/leowood2000/charging-live-dashboard-android/releases) 下载 `charging-live-dashboard-android-v0.11.16.apk`。
+1. 从 [Releases](https://github.com/leowood2000/charging-live-dashboard-android/releases) 下载 `charging-live-dashboard-android-v0.11.17.apk`。
 2. 安装并打开应用。
 3. 在 KernelSU / Magisk 中授予 root 权限。
 

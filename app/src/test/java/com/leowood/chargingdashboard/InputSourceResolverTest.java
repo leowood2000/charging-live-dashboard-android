@@ -50,4 +50,22 @@ public class InputSourceResolverTest {
     public void unknownWirelessConnectionFallsBackToVout() {
         assertEquals(true, InputSourceResolver.resolveWirelessConnected(null, "none", 8500));
     }
+
+    @Test
+    public void stoppedCpWithIdleCpBusUsesUsbSystemInput() {
+        assertEquals("usb_uevent", InputSourceResolver.resolveWiredInputSource(
+                "cp", 5, 238, true, false, 0));
+    }
+
+    @Test
+    public void activeCpKeepsCpBusAsPrimaryInput() {
+        assertEquals("cp_ibus_total", InputSourceResolver.resolveWiredInputSource(
+                "cp", 1800, 238, true, false, 0));
+    }
+
+    @Test
+    public void chargingCpKeepsCpBusEvenAtLowPrestartCurrent() {
+        assertEquals("cp_ibus_total", InputSourceResolver.resolveWiredInputSource(
+                "cp", 5, 238, true, true, 1200));
+    }
 }
