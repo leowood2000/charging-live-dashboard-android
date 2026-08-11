@@ -126,6 +126,19 @@ public final class SnapshotCollector {
     private volatile long lastLogsStartedAt = 0L;
     private static final long ACTIVE_LOG_INTERVAL_MS = 10_000L;
     private static final long IDLE_LOG_INTERVAL_MS = 60_000L;
+    private static final java.util.Set<String> WIRELESS_VOTER_TOPICS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "wireless_buck_input", "wireless_bpp_in", "wireless_bppqc2_in",
+                    "wireless_bppqc3_in", "wireless_epp_in", "wireless_auth_20w",
+                    "wireless_auth_30w", "wireless_auth_50w", "wireless_auth_80w",
+                    "wireless_auth_voice_box", "wireless_auth_magnet_30w",
+                    "wireless_sw_qc_ich", "wireless_sw_thermal_ich",
+                    "wls_single_chg_cur", "wls_multi_chg_cur", "wls_quick_chg_disable"));
+    private static final java.util.Set<String> WIRED_VOTER_TOPICS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "buck_charge_curr", "buck_input", "div1_single", "div1_multi",
+                    "div2_single", "div2_multi", "div4_single", "div4_multi",
+                    "single_chg_cur", "multi_chg_cur", "quick_chg_disable", "quick_chg_en"));
     private String lastError = "";
     private boolean rootOk = false;
     private final int utcOffsetMinutes = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
@@ -210,8 +223,9 @@ public final class SnapshotCollector {
             if (voteReadOk) {
                 JSONObject voters = parseVotes(voteLog);
                 if (voters.length() > 0) {
-                    lastVoters = voters;
-                    lastChgEnabled = effectiveVoteValue(voters, "chg_enable");
+                    lastVoters = mergeVoteTopics(lastVoters, voters);
+                    Integer chg = effectiveVoteValue(lastVoters, "chg_enable");
+                    if (chg != null) lastChgEnabled = chg;
                 }
             }
             if (sessionReadOk) {
@@ -314,6 +328,7 @@ public final class SnapshotCollector {
                 // 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
                 // 新会话/协议变化后尚无遥测时清空缓存并标记等待，页面回退 USB uevent
                 if (isWiredDisconnected(ppLog)) {
+                    lastVoters = clearVoteTopics(lastVoters, WIRED_VOTER_TOPICS);
                     lastWiredCpTel = null;
                     lastWiredBuckTel = null;
                     lastWiredTelWaiting = false;
@@ -456,6 +471,7 @@ public final class SnapshotCollector {
     /** 无线会话级状态统一清空：真正的新 power_good_on 或断开时调用。
      *  lastWlsSessionMs 由调用方维护；这里只清 wireless-session scoped 数据。 */
     private void clearWirelessSessionState() {
+        lastVoters = clearVoteTopics(lastVoters, WIRELESS_VOTER_TOPICS);
         lastWlsIcl = null;
         lastWlsIclAt = null;
         lastWlsIclLogTime = null;
@@ -478,93 +494,63 @@ public final class SnapshotCollector {
         lastRxIoutLimitLogTime = null;
     }
 
+    /** 按 topic 增量合并投票表；日志窗口缺少某个 topic 不等于该 topic 被撤票。 */
+    static JSONObject mergeVoteTopics(JSONObject previous, JSONObject incoming) throws JSONException {
+        JSONObject merged = previous == null ? new JSONObject()
+                : new JSONObject(previous.toString());
+        if (incoming == null) return merged;
+        JSONArray names = incoming.names();
+        if (names == null) return merged;
+        for (int i = 0; i < names.length(); i++) {
+            String topic = names.optString(i, "");
+            JSONObject next = incoming.optJSONObject(topic);
+            if (next == null) continue;
+            JSONObject old = merged.optJSONObject(topic);
+            if (old == null) {
+                merged.put(topic, new JSONObject(next.toString()));
+                continue;
+            }
+            JSONObject block = new JSONObject(old.toString());
+            for (String field : new String[]{"topic", "time", "unit", "policy"}) {
+                String value = next.optString(field, "");
+                if (!value.isEmpty()) block.put(field, value);
+            }
+            for (String field : new String[]{"changed", "result"}) {
+                Object value = next.opt(field);
+                if (value != null && value != JSONObject.NULL) {
+                    block.put(field, value instanceof JSONObject
+                            ? new JSONObject(value.toString()) : value);
+                }
+            }
+            JSONArray rows = next.optJSONArray("rows");
+            if (rows != null && rows.length() > 0) {
+                block.put("rows", new JSONArray(rows.toString()));
+            }
+            merged.put(topic, block);
+        }
+        return merged;
+    }
+
+    /** 在明确的无线/有线会话边界清理对应域，避免旧会话票无限期残留。 */
+    static JSONObject clearVoteTopics(JSONObject voters, java.util.Set<String> topics) {
+        try {
+            JSONObject cleared = voters == null ? new JSONObject()
+                    : new JSONObject(voters.toString());
+            if (topics != null) {
+                for (String topic : topics) cleared.remove(topic);
+            }
+            return cleared;
+        } catch (JSONException e) {
+            return voters == null ? new JSONObject() : voters;
+        }
+    }
+
     /** 统一发布入口：快/慢采集都经此写 snapshotJson，避免互相覆盖。 */
     private synchronized void publishSnapshot(JSONObject core) throws JSONException {
         core.put("voters", lastVoters);
         core.put("sessions", lastSessions);
         if (lastEpp != null) appendEppNode(core, lastEpp);
-        if (lastWlsIcl != null) {
-            JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
-            if (buck != null) buck.put("icl", lastWlsIcl)
-                    .put("icl_time", lastWlsIclLogTime == null ? "" : lastWlsIclLogTime)
-                    .put("icl_at", lastWlsIclAt == null ? 0L : lastWlsIclAt.longValue())
-                    .put("icl_ms", lastWlsIclMs == null ? 0L : lastWlsIclMs.longValue());
-            if (buck != null && lastWlsChgEn != null) buck.put("chg_en", lastWlsChgEn);
-        }
-        JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
-        if (buck != null) {
-            Integer actual = lastQuickCurMax != null ? lastQuickCurMax : lastBuckFcc;
-            if (actual != null) {
-                buck.put("actual_limit", actual)
-                        .put("actual_limit_source",
-                                lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
-            }
-            // 实时 CP 支路电流与当前会话硬件模式融合：预启动 3~5mA 不能
-            // 单独证明 CP，但已确认 operation mode/work_mode 后，瞬时 0mA
-            // 也不能推翻当前 CP 路径。
-            JSONObject derived = core.optJSONObject("derived");
-            double cpIbus = derived == null ? Double.NaN
-                    : derived.optDouble("cp_ibus_total_ma", Double.NaN);
-            boolean liveWirelessConnected = derived != null
-                    && "wireless".equals(derived.optString("input_source"))
-                    && Double.isFinite(cpIbus);
-            Integer evidenceMode = lastWlsCpEvidence ? lastCpMode : null;
-            Integer evidenceWork = lastWlsCpEvidence ? lastCpWorkMode : null;
-            if (liveWirelessConnected) {
-                String liveCpState = classifyWirelessCpIbus(cpIbus);
-                String cpState = resolveWirelessCpState(
-                        cpIbus, evidenceMode, evidenceWork);
-                boolean cpActive = "cp".equals(cpState);
-                buck.put("cp_state", cpState);
-                buck.put("cp_active", cpActive);
-                buck.put("cp_state_source",
-                        !liveCpState.equals(cpState)
-                                ? "sysfs_cp_ibus_total+session_cp_mode"
-                                : "sysfs_cp_ibus_total");
-                buck.put("cp_session_evidence", lastWlsCpEvidence);
-                buck.put("cp_ibus_total_ma", cpIbus);
-                if (cpActive && evidenceWork != null) {
-                    buck.put("cp_ratio", evidenceWork);
-                }
-            } else if (evidenceWork != null
-                    && (evidenceWork == 1 || evidenceWork == 2 || evidenceWork == 4)) {
-                buck.put("cp_state", "cp");
-                buck.put("cp_ratio", evidenceWork);
-                buck.put("cp_active", true);
-                buck.put("cp_state_source", "quick_wireless_work_mode");
-                buck.put("cp_session_evidence", lastWlsCpEvidence);
-            } else if (evidenceMode != null) {
-                boolean cpActive = evidenceMode > 0;
-                buck.put("cp_state", cpActive ? "cp" : "buck");
-                buck.put("cp_active", cpActive);
-                buck.put("cp_state_source", "sc8581_operation_mode");
-                buck.put("cp_session_evidence", lastWlsCpEvidence);
-                if (cpActive && evidenceWork != null) {
-                    buck.put("cp_ratio", evidenceWork);
-                }
-            } else {
-                buck.put("cp_state", "unknown");
-                buck.put("cp_active", false);
-                buck.put("cp_state_source", "none");
-                buck.put("cp_session_evidence", lastWlsCpEvidence);
-            }
-            if (lastWlsWorkModeMs != null) {
-                buck.put("wls_work_mode_ms", lastWlsWorkModeMs.longValue());
-            }
-            if (lastCurDecision != null) buck.put("cur_max_decision", lastCurDecision);
-            // 无线控制模式：仅标识 BPP drawload / EPP+/QC，不做 ICL/iout 一致性判定
-            buck.put("wls_mode", lastWlsMode == null ? "unknown" : lastWlsMode);
-            // rx_iout_limit：会话状态机输出（captured / at / stale）
-            buck.put("rx_iout_limit", lastRxIoutLimit == null
-                    ? JSONObject.NULL : lastRxIoutLimit.intValue())
-                    .put("rx_iout_limit_captured", rxIoutLimitCaptured)
-                    .put("rx_iout_limit_at", lastRxIoutLimitAt == null
-                            ? 0L : lastRxIoutLimitAt.longValue())
-                    .put("rx_iout_limit_time", lastRxIoutLimitLogTime == null
-                            ? "" : lastRxIoutLimitLogTime)
-                    .put("rx_iout_limit_stale", logsStale)
-                    .put("smartendura_soc_limit", lastSmartenduraSocLimit);
-        }
+        decorateWirelessPath(core);
         // 有线 CP 三态：cp / buck / unknown（本会话无 SC8581 模式日志则待确认）
         JSONObject derived = core.optJSONObject("derived");
         if (derived == null) {
@@ -594,6 +580,104 @@ public final class SnapshotCollector {
                 .put("version", BuildConfig.VERSION_NAME);
         core.put("meta", meta);
         publishJson(core);
+    }
+
+    /**
+     * 发布独立的 wireless_path 派生对象。voters.wireless_buck_input 仅是
+     * 投票详情兼容层；日志滑窗暂时没有该 topic 时，路径、比例、Final、ICL
+     * 仍由当前无线会话状态继续发布。
+     */
+    private void decorateWirelessPath(JSONObject core) throws JSONException {
+        JSONObject derived = core.optJSONObject("derived");
+        if (derived == null) {
+            derived = new JSONObject();
+            core.put("derived", derived);
+        }
+        JSONObject path = new JSONObject();
+        if (lastWlsIcl != null) {
+            path.put("wireless_icl", lastWlsIcl)
+                    .put("wireless_icl_time", lastWlsIclLogTime == null ? "" : lastWlsIclLogTime)
+                    .put("wireless_icl_at", lastWlsIclAt == null ? 0L : lastWlsIclAt.longValue())
+                    .put("wireless_icl_ms", lastWlsIclMs == null ? 0L : lastWlsIclMs.longValue());
+            if (lastWlsChgEn != null) path.put("wireless_icl_chg_en", lastWlsChgEn);
+        }
+        Integer actual = lastQuickCurMax != null ? lastQuickCurMax : lastBuckFcc;
+        if (actual != null) {
+            path.put("battery_limit_ma", actual)
+                    .put("battery_limit_source",
+                            lastQuickCurMax != null ? "quick_wireless cur_max" : "wireless loop buck_fcc");
+        }
+        double cpIbus = derived.optDouble("cp_ibus_total_ma", Double.NaN);
+        boolean liveWirelessConnected = "wireless".equals(derived.optString("input_source"))
+                && Double.isFinite(cpIbus);
+        Integer evidenceMode = lastWlsCpEvidence ? lastCpMode : null;
+        Integer evidenceWork = lastWlsCpEvidence ? lastCpWorkMode : null;
+        String cpState;
+        String cpSource;
+        boolean cpActive;
+        if (liveWirelessConnected) {
+            String liveCpState = classifyWirelessCpIbus(cpIbus);
+            cpState = resolveWirelessCpState(cpIbus, evidenceMode, evidenceWork);
+            cpActive = "cp".equals(cpState);
+            cpSource = !liveCpState.equals(cpState)
+                    ? "sysfs_cp_ibus_total+session_cp_mode" : "sysfs_cp_ibus_total";
+            path.put("cp_ibus_total_ma", cpIbus);
+        } else if (evidenceWork != null
+                && (evidenceWork == 1 || evidenceWork == 2 || evidenceWork == 4)) {
+            cpState = "cp";
+            cpActive = true;
+            cpSource = "quick_wireless_work_mode";
+        } else if (evidenceMode != null) {
+            cpActive = evidenceMode > 0;
+            cpState = cpActive ? "cp" : "buck";
+            cpSource = "sc8581_operation_mode";
+        } else {
+            cpState = "unknown";
+            cpActive = false;
+            cpSource = "none";
+        }
+        path.put("state", cpState)
+                .put("cp_active", cpActive)
+                .put("cp_state_source", cpSource)
+                .put("cp_session_evidence", lastWlsCpEvidence)
+                .put("ratio", cpActive && evidenceWork != null ? evidenceWork : JSONObject.NULL)
+                .put("wls_mode", lastWlsMode == null ? "unknown" : lastWlsMode)
+                .put("rx_iout_limit", lastRxIoutLimit == null
+                        ? JSONObject.NULL : lastRxIoutLimit.intValue())
+                .put("rx_iout_limit_captured", rxIoutLimitCaptured)
+                .put("rx_iout_limit_at", lastRxIoutLimitAt == null
+                        ? 0L : lastRxIoutLimitAt.longValue())
+                .put("rx_iout_limit_time", lastRxIoutLimitLogTime == null
+                        ? "" : lastRxIoutLimitLogTime)
+                .put("rx_iout_limit_stale", logsStale)
+                .put("smartendura_soc_limit", lastSmartenduraSocLimit);
+        if (lastWlsWorkModeMs != null) path.put("wls_work_mode_ms", lastWlsWorkModeMs.longValue());
+        if (lastCurDecision != null) path.put("cur_max_decision", new JSONObject(lastCurDecision.toString()));
+        derived.put("wireless_path", path);
+
+        // 兼容旧前端/投票详情：topic 存在时镜像派生字段，但不再依赖它。
+        JSONObject buck = core.getJSONObject("voters").optJSONObject("wireless_buck_input");
+        if (buck != null) {
+            JSONArray names = path.names();
+            if (names != null) {
+                for (int i = 0; i < names.length(); i++) {
+                    String name = names.optString(i, "");
+                    Object value = path.opt(name);
+                    if (value != null) buck.put(name, value);
+                }
+            }
+            if (path.has("wireless_icl")) {
+                buck.put("icl", path.opt("wireless_icl"))
+                        .put("icl_time", path.optString("wireless_icl_time", ""))
+                        .put("icl_at", path.optLong("wireless_icl_at", 0L))
+                        .put("icl_ms", path.optLong("wireless_icl_ms", 0L));
+            }
+            if (path.has("battery_limit_ma")) {
+                buck.put("actual_limit", path.opt("battery_limit_ma"))
+                        .put("actual_limit_source", path.optString("battery_limit_source", ""));
+            }
+            if (lastWlsChgEn != null) buck.put("chg_en", lastWlsChgEn);
+        }
     }
 
     /** 唯一写入点：所有状态（loading/offline/live）都经此发布，避免并发覆盖。 */
@@ -1272,6 +1356,20 @@ public final class SnapshotCollector {
                             .put("enable", Integer.parseInt(rm.group(3)))
                             .put("value", Integer.parseInt(rm.group(4))));
                 }
+            }
+        }
+        // 结果/变动行经常位于 VOTER 表头之后；解析结束后再回填，避免 topic
+        // 只保留表头时丢掉当前 effective。日志窗口滚动时由 mergeVoteTopics 续接旧 topic。
+        JSONArray topicNames = blocks.names();
+        if (topicNames != null) {
+            for (int i = 0; i < topicNames.length(); i++) {
+                String topic = topicNames.optString(i, "");
+                JSONObject block = blocks.optJSONObject(topic);
+                if (block == null) continue;
+                JSONObject changed = changesByTopic.get(topic);
+                JSONObject result = resultsByTopic.get(topic);
+                if (changed != null) block.put("changed", changed);
+                if (result != null) block.put("result", result);
             }
         }
         return blocks;
