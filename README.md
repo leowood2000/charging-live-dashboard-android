@@ -2,11 +2,11 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.13（versionCode 60）**。
+当前版本：**v0.11.14（versionCode 61）**。
 
 Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/charging-live-dashboard)。两版的数据语义保持一致。
 
-## v0.11.13 重点改进
+## v0.11.14 重点改进
 
 ### 更低的应用自身功耗
 
@@ -23,7 +23,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 ### 更紧凑、层次更清楚的界面
 
 - 实时数据压缩为输入功率、电池功率、电池电流、电池电压、电池温度和 SOC。
-- “当前限制”固定顺序：充电路径最先；当前电池充电电流上限与实际电池电流组成一组；无线输入 ICL 与实际 RX 输出组成一组；温度、场景和使能状态随后展示。
+- “当前限制”固定顺序：充电路径最先；当前电池充电电流上限与实际电池电流组成一组；无线 CP 显示 RX 允许上限与实际 RX，Buck/旁路显示无线输入 ICL 与实际 RX；温度、场景和使能状态随后展示。
 - 电池上限尚未捕获时保留 `-- / 待捕获`，避免数据缺失时整项消失。
 - 私有快充、无线策略、有线策略和实时会话档案默认折叠。
 - 四条曲线依次为：电池电流、输入电流、输入电压、输入功率。
@@ -39,7 +39,9 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 - 日志年龄采用事件真实时间，并正确处理单个日志文件跨午夜；重启采集器不会把旧决策误标成“刚刚”。
 - 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP 使用当前 `div1/div2/div4` 路径的 `mca_thermal` 上限；Buck 使用 `buck_charge_curr effective`。路径或 single/multi 拓扑不能唯一确定时显示“待确认”。
 - 从有线切换到无线时，实时输入源优先于残留 USB ONLINE/有线 CP 日志，避免无线慢充沿用上一段有线 CP 路径。
-- 无线输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；实际 RX 输出取 `wls_debug iout`，属于遥测。二者配对观察，但不做数值一致性判断。
+- 无线 CP 总览显示 `RX 输出允许上限` 与 `实际 RX 输出` 两行；两行分别使用与电池上限/实际电流相同的主次高亮颜色。
+- 无线停充但仍在旁路供电时，保留当前会话的 `无线输入 ICL（旁路）`；电池充电上限显示为 `-- / 已停止`。
+- 无线 Buck/旁路输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；无线 CP 的 RX 允许上限取当前会话 `rx_iout_limit`；实际 RX 输出取 `wls_debug iout`，属于遥测。各字段处于不同控制域，不做数值一致性判断。
 - `wireless_qc=100` 表示策略修正/下降量语义，不能解释为“最终输入限流为 100mA”，也不能作为最终无线输入 ICL。
 - `xm_wls` 是能力/适配器允许值，不等同当前仲裁 winner。
 - `rx_iout_limit` 是驱动策略层的 RX 允许上限，和实际 RX 输出、上游 ICL 是不同层级。
@@ -50,7 +52,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 
 ## 安装
 
-1. 从 [Releases](https://github.com/leowood2000/charging-live-dashboard-android/releases) 下载 `charging-live-dashboard-android-v0.11.13.apk`。
+1. 从 [Releases](https://github.com/leowood2000/charging-live-dashboard-android/releases) 下载 `charging-live-dashboard-android-v0.11.14.apk`。
 2. 安装并打开应用。
 3. 在 KernelSU / Magisk 中授予 root 权限。
 
