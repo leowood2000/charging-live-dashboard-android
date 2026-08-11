@@ -114,6 +114,8 @@ public final class SnapshotCollector {
     private volatile boolean lastSmartenduraSocLimit = false;
     /** 最后一条 power_good_on 的归一化毫秒（会话边界 key，跨文件单调）。 */
     private volatile Long lastWlsSessionMs = null;
+    /** 无线充电板物理连接状态：由 power_good_on/off 锁存，不随 iout 低于阈值抖动。 */
+    private volatile Boolean lastWirelessConnected = null;
     private volatile long lastLogsUpdatedAt = System.currentTimeMillis();
     private volatile boolean logsStale = false;
     private volatile boolean powerPathLogsStale = false;
@@ -223,10 +225,14 @@ public final class SnapshotCollector {
                     }
                 }
                 if (isLastWirelessPowerOff(sessionLog)) {
+                    lastWirelessConnected = false;
                     // 无线已断开：清掉全部无线会话状态，避免上一会话的值继续覆盖显示
                     clearWirelessSessionState();
                     lastWlsSessionMs = null;
                 } else {
+                    if (sessionLog.contains("wireless power_good_on")) {
+                        lastWirelessConnected = true;
+                    }
                     // 所有无线执行层数据统一按最近一次 power_good_on 截断，
                     // 避免上一会话的 ICL/buck_fcc 混进新会话
                     String wtail = splitAfterLastWirelessAttach(sessionLog);
@@ -271,6 +277,7 @@ public final class SnapshotCollector {
                 boolean ppNewSession = !ppOff && pgMs != null
                         && (lastWlsSessionMs == null || pgMs > lastWlsSessionMs);
                 if (ppOff) {
+                    lastWirelessConnected = false;
                     // pp 通道明确断开（session 通道失败时的兜底）：清无线 CP/quick 状态
                     lastCpMode = null;
                     lastCpWorkMode = null;
@@ -281,6 +288,7 @@ public final class SnapshotCollector {
                     lastQuickCurMax = null;
                     lastWlsSessionMs = null;
                 } else if (ppNewSession) {
+                    lastWirelessConnected = true;
                     // 真正的新无线会话边界：统一清空 wireless-session scoped 状态，
                     // 本轮 pp 有新证据再重新填（避免旧 Final 串进新会话）
                     lastWlsSessionMs = pgMs;
@@ -832,6 +840,8 @@ public final class SnapshotCollector {
         String inputSource = InputSourceResolver.resolve(
                 usbOnlineState, usbVbusMv, wirelessSignal);
         boolean wiredPresent = "wired".equals(inputSource);
+        boolean wirelessConnected = InputSourceResolver.resolveWirelessConnected(
+                lastWirelessConnected, inputSource, vout);
 
         JSONObject cpTel = lastWiredCpTel;
         JSONObject buckTel = lastWiredBuckTel;
@@ -924,6 +934,9 @@ public final class SnapshotCollector {
         }
 
         derived.put("input_source", inputSource);
+        derived.put("wireless_connected", wirelessConnected);
+        derived.put("wired_connected", wiredPresent);
+        derived.put("input_connected", wiredPresent || wirelessConnected);
         derived.put("input_detail_source",
                 "wired".equals(inputSource) ? (rtSource == null ? JSONObject.NULL : rtSource)
                         : "wireless".equals(inputSource) ? "wls_debug" : JSONObject.NULL);
