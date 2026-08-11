@@ -818,14 +818,20 @@ public final class SnapshotCollector {
 
         // 有线输入遥测：按 wired_cp.state 选择来源（CP→regulation，Buck→buckchg，
         // unknown→最新一条），USB uevent 仅作兜底且永远带 source/时间。
-        boolean usbOnline = "1".equals(usbRaw.optString("ONLINE", ""));
-        boolean usbKnownOff = "0".equals(usbRaw.optString("ONLINE", ""));
+        String usbOnlineRaw = usbRaw.optString("ONLINE", "");
+        Boolean usbOnlineState = "1".equals(usbOnlineRaw) ? Boolean.TRUE
+                : "0".equals(usbOnlineRaw) ? Boolean.FALSE : null;
+        boolean usbOnline = Boolean.TRUE.equals(usbOnlineState);
+        boolean usbKnownOff = Boolean.FALSE.equals(usbOnlineState);
         double usbVbusMv = optNum(usbRaw, "VOLTAGE_NOW") / 1000.0;
         double usbIbusMa = optNum(usbRaw, "CURRENT_NOW") / 1000.0;
-        // 拔线后 CP/Buck 日志会留在缓存；只有实时 USB online，或 VBUS 明确
-        // 高于 1V，才允许历史策略遥测证明“有线仍连接”。
-        boolean wiredPresent = usbOnline
-                || (Double.isFinite(usbVbusMv) && usbVbusMv > 1000.0);
+        boolean wirelessSignal = Double.isFinite(vout) && Double.isFinite(iout)
+                && vout > 1000.0 && iout > 100.0;
+        // ONLINE=0 是有线硬否决；只有字段未知时才允许 VBUS 回退。
+        // ibus_total 是有线/无线 CP 共用测量，绝不能参与输入源判定。
+        String inputSource = InputSourceResolver.resolve(
+                usbOnlineState, usbVbusMv, wirelessSignal);
+        boolean wiredPresent = "wired".equals(inputSource);
 
         JSONObject cpTel = lastWiredCpTel;
         JSONObject buckTel = lastWiredBuckTel;
@@ -904,32 +910,17 @@ public final class SnapshotCollector {
 
         // 当前输入源抽象层：无线已有有效 RX 电流时，不能让拔线瞬间残留的
         // USB ONLINE/旧 CP 遥测继续把页面锁在有线 CP 分支。
-        String inputSource;
         double inputVolMv = Double.NaN;
         double inputCurMa = Double.NaN;
         double inputPower = Double.NaN;
-        boolean wirelessSignal = Double.isFinite(vout) && Double.isFinite(iout)
-                && vout > 1000.0 && iout > 100.0;
-        boolean staleWiredShell = wiredOnline && wirelessSignal
-                && (!Double.isFinite(rtIbusMa) || rtIbusMa < 100.0);
-        if (wirelessSignal && (!wiredOnline || staleWiredShell)) {
-            inputSource = "wireless";
+        if ("wireless".equals(inputSource)) {
             inputVolMv = vout;
             inputCurMa = iout;
             inputPower = vout * iout / 1e6;
-        } else if (wiredOnline) {
-            inputSource = "wired";
+        } else if ("wired".equals(inputSource)) {
             inputVolMv = rtVbusMv;
             inputCurMa = rtIbusMa;
             inputPower = wiredPower;
-        } else if (Double.isFinite(vout) && Double.isFinite(iout)
-                && (vout != 0 || iout != 0)) {
-            inputSource = "wireless";
-            inputVolMv = vout;
-            inputCurMa = iout;
-            inputPower = vout * iout / 1e6;
-        } else {
-            inputSource = "none";
         }
 
         derived.put("input_source", inputSource);
@@ -968,7 +959,10 @@ public final class SnapshotCollector {
         derived.put("wired_tel_at", telAt == 0L ? JSONObject.NULL : telAt);
         derived.put("wired_usb_online", usbOnline);
         // 每 3 秒读取的实时 CP 总线电流；用于日志未打印模式行时判定无线 Buck/CP。
-        putFinite(derived, "cp_ibus_total_ma", nodeNum(nodesObj.optJSONObject("ibus_total")));
+        double cpIbusTotalMa = nodeNum(nodesObj.optJSONObject("ibus_total"));
+        putFinite(derived, "cp_ibus_total_ma", cpIbusTotalMa);
+        derived.put("cp_ibus_owner",
+                InputSourceResolver.cpIbusOwner(inputSource, cpIbusTotalMa));
         putFinite(derived, "battery_power_w", battCurMa * battVolMv / 1e6);
         putFinite(derived, "batt_current_ma", battCurMa);
         putFinite(derived, "batt_voltage_mv", battVolMv);
