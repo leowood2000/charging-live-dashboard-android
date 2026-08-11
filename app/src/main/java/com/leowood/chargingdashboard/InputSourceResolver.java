@@ -25,4 +25,14 @@ final class InputSourceResolver {
         return "wired".equals(inputSource) || "wireless".equals(inputSource)
                 ? inputSource : "none";
     }
+
+    static boolean resolveWirelessConnected(Boolean latched,
+                                            String inputSource,
+                                            double voutMv) {
+        if (latched != null) {
+            return latched;
+        }
+        return "wireless".equals(inputSource)
+                || Double.isFinite(voutMv) && voutMv > 1000.0;
+    }
 }

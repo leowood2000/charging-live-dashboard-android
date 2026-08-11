@@ -35,4 +35,19 @@ public class InputSourceResolverTest {
         int staleWiredRatio = 1;
         assertEquals(2, "wireless".equals(source) ? wirelessWorkMode : staleWiredRatio);
     }
+
+    @Test
+    public void latchedWirelessConnectionSurvivesLowRxBypassCurrent() {
+        assertEquals(true, InputSourceResolver.resolveWirelessConnected(true, "none", 8500));
+    }
+
+    @Test
+    public void latchedWirelessOffRejectsResidualVout() {
+        assertEquals(false, InputSourceResolver.resolveWirelessConnected(false, "wireless", 8500));
+    }
+
+    @Test
+    public void unknownWirelessConnectionFallsBackToVout() {
+        assertEquals(true, InputSourceResolver.resolveWirelessConnected(null, "none", 8500));
+    }
 }
