@@ -59,6 +59,8 @@ public final class SnapshotCollector {
     private volatile String snapshotJson = null;
     /** 慢速日志结果由 collectLogs 独占写入、collectFast 只读，volatile 保证可见性。 */
     private volatile JSONObject lastVoters = new JSONObject();
+    /** 最近一次 chg_enable effective vote；用于停充后校正有线输入测量源。 */
+    private volatile Integer lastChgEnabled = null;
     private volatile JSONArray lastSessions = new JSONArray();
     /** 最近一次有效热控快照；空闲时 thermal.dump 尾部无无线行仍可立即显示。 */
     private volatile JSONObject lastThermal = new JSONObject();
@@ -207,7 +209,10 @@ public final class SnapshotCollector {
             // 读取成功才解析；解析无匹配（如当前无投票输出）不覆盖旧数据也不算失败
             if (voteReadOk) {
                 JSONObject voters = parseVotes(voteLog);
-                if (voters.length() > 0) lastVoters = voters;
+                if (voters.length() > 0) {
+                    lastVoters = voters;
+                    lastChgEnabled = effectiveVoteValue(voters, "chg_enable");
+                }
             }
             if (sessionReadOk) {
                 JSONArray sessions = parseSessions(sessionLog);
@@ -833,6 +838,7 @@ public final class SnapshotCollector {
         boolean usbKnownOff = Boolean.FALSE.equals(usbOnlineState);
         double usbVbusMv = optNum(usbRaw, "VOLTAGE_NOW") / 1000.0;
         double usbIbusMa = optNum(usbRaw, "CURRENT_NOW") / 1000.0;
+        double cpIbusTotalMa = nodeNum(nodesObj.optJSONObject("ibus_total"));
         boolean wirelessSignal = Double.isFinite(vout) && Double.isFinite(iout)
                 && vout > 1000.0 && iout > 100.0;
         // ONLINE=0 是有线硬否决；只有字段未知时才允许 VBUS 回退。
@@ -887,13 +893,16 @@ public final class SnapshotCollector {
         double rtIbusMa = Double.NaN;
         String rtSource = null;
         long rtAt = 0L;
-        if ("cp".equals(wstate) && wiredPresent) {
-            double ibusTotal = nodeNum(nodesObj.optJSONObject("ibus_total"));
-            if (Double.isFinite(ibusTotal)) {
+        String preferredWiredSource = InputSourceResolver.resolveWiredInputSource(
+                wstate, cpIbusTotalMa, usbIbusMa, usbOnline,
+                lastChgEnabled == null ? null : lastChgEnabled == 1,
+                battCurMa);
+        if ("cp_ibus_total".equals(preferredWiredSource) && wiredPresent) {
+            if (Double.isFinite(cpIbusTotalMa)) {
                 double vb = Double.isFinite(telVbusMv) ? telVbusMv : usbVbusMv;
-                if (Double.isFinite(vb) && Double.isFinite(ibusTotal)) {
+                if (Double.isFinite(vb)) {
                     rtVbusMv = vb;
-                    rtIbusMa = ibusTotal;
+                    rtIbusMa = cpIbusTotalMa;
                     rtSource = "cp_ibus_total";
                     rtAt = nowMs;
                 }
@@ -972,7 +981,6 @@ public final class SnapshotCollector {
         derived.put("wired_tel_at", telAt == 0L ? JSONObject.NULL : telAt);
         derived.put("wired_usb_online", usbOnline);
         // 每 3 秒读取的实时 CP 总线电流；用于日志未打印模式行时判定无线 Buck/CP。
-        double cpIbusTotalMa = nodeNum(nodesObj.optJSONObject("ibus_total"));
         putFinite(derived, "cp_ibus_total_ma", cpIbusTotalMa);
         derived.put("cp_ibus_owner",
                 InputSourceResolver.cpIbusOwner(inputSource, cpIbusTotalMa));
@@ -1267,6 +1275,12 @@ public final class SnapshotCollector {
             }
         }
         return blocks;
+    }
+
+    private static Integer effectiveVoteValue(JSONObject voters, String topic) {
+        JSONObject block = voters.optJSONObject(topic);
+        JSONObject result = block == null ? null : block.optJSONObject("result");
+        return result == null || !result.has("value") ? null : result.optInt("value");
     }
 
     private String shiftLogTime(String t) {
