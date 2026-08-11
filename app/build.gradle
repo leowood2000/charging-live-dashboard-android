@@ -14,8 +14,8 @@ android {
         applicationId "com.leowood.chargingdashboard"
         minSdk 28
         targetSdk 34
-        versionCode 61
-        versionName "0.11.14"
+        versionCode 62
+        versionName "0.11.15"
     }
 
     buildTypes {
@@ -32,4 +32,5 @@ android {
 
 dependencies {
     // 纯系统 API：WebView + org.json，无第三方依赖
+    testImplementation 'junit:junit:4.13.2'
 }
