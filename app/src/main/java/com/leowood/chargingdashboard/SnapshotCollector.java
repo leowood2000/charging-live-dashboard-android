@@ -81,6 +81,8 @@ public final class SnapshotCollector {
     private volatile Integer lastCpMode = null;
     /** quick wireless 电荷泵分压比 work_mode（1/2/4 → 1:1/2:1/4:1）。 */
     private volatile Integer lastCpWorkMode = null;
+    /** 低电流时允许保留 CP 的唯一依据：必须来自当前 power_good 会话。 */
+    private volatile boolean lastWlsCpEvidence = false;
     /** select_max_ibat 完整决策（输入 + cur_max Final + 日志时间）。 */
     private volatile JSONObject lastCurDecision = null;
     /** 有线功率路径状态：cp / buck / unknown（时间顺序 + CP 证据优先）。 */
@@ -272,6 +274,7 @@ public final class SnapshotCollector {
                     // pp 通道明确断开（session 通道失败时的兜底）：清无线 CP/quick 状态
                     lastCpMode = null;
                     lastCpWorkMode = null;
+                    lastWlsCpEvidence = false;
                     lastWlsWorkModeMs = null;
                     lastCurDecision = null;
                     lastCurDecisionKey = null;
@@ -330,10 +333,16 @@ public final class SnapshotCollector {
                             // 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
                             lastCpWorkMode = null;
                             lastWlsWorkModeMs = null;
+                            lastWlsCpEvidence = false;
+                        } else if (lastCpMode > 0) {
+                            lastWlsCpEvidence = true;
                         }
                     }
                     if (!cpState.isNull("w_work")) {
                         lastCpWorkMode = cpState.getInt("w_work");
+                        if (lastCpWorkMode == 1 || lastCpWorkMode == 2 || lastCpWorkMode == 4) {
+                            lastWlsCpEvidence = true;
+                        }
                         if (!cpState.isNull("w_work_ms")) {
                             lastWlsWorkModeMs = cpState.getLong("w_work_ms");
                         }
@@ -351,10 +360,16 @@ public final class SnapshotCollector {
                             // 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
                             lastCpWorkMode = null;
                             lastWlsWorkModeMs = null;
+                            lastWlsCpEvidence = false;
+                        } else if (lastCpMode > 0) {
+                            lastWlsCpEvidence = true;
                         }
                     }
                     if (!cpState.isNull("w_work")) {
                         lastCpWorkMode = cpState.getInt("w_work");
+                        if (lastCpWorkMode == 1 || lastCpWorkMode == 2 || lastCpWorkMode == 4) {
+                            lastWlsCpEvidence = true;
+                        }
                         if (!cpState.isNull("w_work_ms")) {
                             lastWlsWorkModeMs = cpState.getLong("w_work_ms");
                         }
@@ -439,6 +454,7 @@ public final class SnapshotCollector {
         lastBuckFcc = null;
         lastCpMode = null;
         lastCpWorkMode = null;
+        lastWlsCpEvidence = false;
         lastWlsWorkModeMs = null;
         lastCurDecision = null;
         lastCurDecisionKey = null;
@@ -479,10 +495,12 @@ public final class SnapshotCollector {
             boolean liveWirelessConnected = derived != null
                     && "wireless".equals(derived.optString("input_source"))
                     && Double.isFinite(cpIbus);
+            Integer evidenceMode = lastWlsCpEvidence ? lastCpMode : null;
+            Integer evidenceWork = lastWlsCpEvidence ? lastCpWorkMode : null;
             if (liveWirelessConnected) {
                 String liveCpState = classifyWirelessCpIbus(cpIbus);
                 String cpState = resolveWirelessCpState(
-                        cpIbus, lastCpMode, lastCpWorkMode);
+                        cpIbus, evidenceMode, evidenceWork);
                 boolean cpActive = "cp".equals(cpState);
                 buck.put("cp_state", cpState);
                 buck.put("cp_active", cpActive);
@@ -490,28 +508,32 @@ public final class SnapshotCollector {
                         !liveCpState.equals(cpState)
                                 ? "sysfs_cp_ibus_total+session_cp_mode"
                                 : "sysfs_cp_ibus_total");
+                buck.put("cp_session_evidence", lastWlsCpEvidence);
                 buck.put("cp_ibus_total_ma", cpIbus);
-                if (cpActive && lastCpWorkMode != null) {
-                    buck.put("cp_ratio", lastCpWorkMode);
+                if (cpActive && evidenceWork != null) {
+                    buck.put("cp_ratio", evidenceWork);
                 }
-            } else if (lastCpWorkMode != null
-                    && (lastCpWorkMode == 1 || lastCpWorkMode == 2 || lastCpWorkMode == 4)) {
+            } else if (evidenceWork != null
+                    && (evidenceWork == 1 || evidenceWork == 2 || evidenceWork == 4)) {
                 buck.put("cp_state", "cp");
-                buck.put("cp_ratio", lastCpWorkMode);
+                buck.put("cp_ratio", evidenceWork);
                 buck.put("cp_active", true);
                 buck.put("cp_state_source", "quick_wireless_work_mode");
-            } else if (lastCpMode != null) {
-                boolean cpActive = lastCpMode > 0;
+                buck.put("cp_session_evidence", lastWlsCpEvidence);
+            } else if (evidenceMode != null) {
+                boolean cpActive = evidenceMode > 0;
                 buck.put("cp_state", cpActive ? "cp" : "buck");
                 buck.put("cp_active", cpActive);
                 buck.put("cp_state_source", "sc8581_operation_mode");
-                if (cpActive && lastCpWorkMode != null) {
-                    buck.put("cp_ratio", lastCpWorkMode);
+                buck.put("cp_session_evidence", lastWlsCpEvidence);
+                if (cpActive && evidenceWork != null) {
+                    buck.put("cp_ratio", evidenceWork);
                 }
             } else {
                 buck.put("cp_state", "unknown");
                 buck.put("cp_active", false);
                 buck.put("cp_state_source", "none");
+                buck.put("cp_session_evidence", lastWlsCpEvidence);
             }
             if (lastWlsWorkModeMs != null) {
                 buck.put("wls_work_mode_ms", lastWlsWorkModeMs.longValue());
@@ -880,12 +902,22 @@ public final class SnapshotCollector {
         // mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
         double wiredPower = wiredOnline ? rtVbusMv * rtIbusMa / 1e6 : Double.NaN;
 
-        // 当前输入源抽象层：有线优先（避免旧无线残留值覆盖），无输入时为 none
+        // 当前输入源抽象层：无线已有有效 RX 电流时，不能让拔线瞬间残留的
+        // USB ONLINE/旧 CP 遥测继续把页面锁在有线 CP 分支。
         String inputSource;
         double inputVolMv = Double.NaN;
         double inputCurMa = Double.NaN;
         double inputPower = Double.NaN;
-        if (wiredOnline) {
+        boolean wirelessSignal = Double.isFinite(vout) && Double.isFinite(iout)
+                && vout > 1000.0 && iout > 100.0;
+        boolean staleWiredShell = wiredOnline && wirelessSignal
+                && (!Double.isFinite(rtIbusMa) || rtIbusMa < 100.0);
+        if (wirelessSignal && (!wiredOnline || staleWiredShell)) {
+            inputSource = "wireless";
+            inputVolMv = vout;
+            inputCurMa = iout;
+            inputPower = vout * iout / 1e6;
+        } else if (wiredOnline) {
             inputSource = "wired";
             inputVolMv = rtVbusMv;
             inputCurMa = rtIbusMa;
@@ -1468,6 +1500,8 @@ public final class SnapshotCollector {
             "mca_quick_charge_select_max_ibat:.*cur_stage (\\d+) cur_max (\\d+) delta_cur (\\d+) cur_work_cp");
     private static final Pattern WIRED_FINAL_CUR_MAX_RE = Pattern.compile(
             "mca_quick_charge_select_max_ibat:.*cur_max (\\d+) secure_cur (\\d+) channel_cur (\\d+) thermal_cur (\\d+)");
+    private static final Pattern WIRED_OPERATION_RE = Pattern.compile(
+            "sc8581_set_operation_mode:.*work_mode\\s+(\\d+)");
     private static final Pattern WIRELESS_WORK_MODE_RE = Pattern.compile(
             "mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\\d+)");
 
@@ -1667,7 +1701,8 @@ public final class SnapshotCollector {
     }
 
     /** 无线/有线 CP 状态彻底解耦：power_good 只重置无线；usb online/real_type changed 只重置有线；
-     *  SC8581 operation mode 只在对应 quickchg 上下文出现后写入对应 track。 */
+     *  有线 sc8581_set_operation_mode 行没有 quickchg 上下文前缀，按最近有线边界直接作为有线证据；
+     *  无线仍要求 quickchg 上下文，避免旧会话操作模式污染慢充。 */
     private JSONObject parseSessionCpState(String text) throws JSONException {
         Integer wMode = null;
         Integer wWork = null;
@@ -1686,10 +1721,12 @@ public final class SnapshotCollector {
         boolean dCtx = false;
         JSONObject dCurMax = null;
         JSONObject dStageCurMax = null;
+        String lastBoundaryKind = null;
         int seq = 0;
         for (String line : text.split("\n")) {
             seq++;
             if (line.contains("power_good_on") || line.contains("power_good_off")) {
+                lastBoundaryKind = "wireless";
                 wBoundary = true;
                 wMode = null;
                 wWork = null;
@@ -1701,6 +1738,7 @@ public final class SnapshotCollector {
             }
             if (line.contains("usb online: 0") || line.contains("usb online: 1")
                     || line.contains("real_type changed:")) {
+                lastBoundaryKind = "wired";
                 dBoundary = true;
                 dMode = null;
                 dModeSeq = -1;
@@ -1728,10 +1766,18 @@ public final class SnapshotCollector {
             Matcher m = CP_MODE_RE.matcher(line);
             if (m.find()) {
                 int n = Integer.parseInt(m.group(1));
-                if (wCtx) wMode = n;
-                if (dCtx) {
+                if (wCtx && "wireless".equals(lastBoundaryKind)) wMode = n;
+                else if (dCtx && "wired".equals(lastBoundaryKind)) {
                     dMode = n;
                     dModeSeq = seq;
+                } else if (line.contains("sc8581_set_operation_mode")
+                        && "wired".equals(lastBoundaryKind)) {
+                    // 有线 cp_sc8581 行没有 mca_quick_charge_/strategy_quickchg_ 前缀，
+                    // 仅依赖 dCtx 会把明确的 mode=1 丢掉，随后被 buckchg 行误判为 Buck。
+                    dMode = n;
+                    dModeSeq = seq;
+                    Matcher opRatio = WIRED_OPERATION_RE.matcher(line);
+                    if (opRatio.find()) dRatio = Integer.parseInt(opRatio.group(1));
                 }
                 continue;
             }
