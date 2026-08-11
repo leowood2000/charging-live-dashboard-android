@@ -93,6 +93,8 @@ public final class SnapshotCollector {
     private volatile boolean lastWiredCurCp = false;
     private volatile JSONObject lastWiredCurMax = null;
     private volatile JSONObject lastWiredStageCurMax = null;
+    /** 最近一次 USB/real_type 会话边界；用于判断共享 Buck FCC 票是否属于本次有线会话。 */
+    private volatile Long lastWiredSessionMs = null;
     /** 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）。 */
     private volatile String lastCurDecisionKey = null;
     private volatile String lastWiredCurMaxKey = null;
@@ -136,7 +138,9 @@ public final class SnapshotCollector {
                     "wls_single_chg_cur", "wls_multi_chg_cur", "wls_quick_chg_disable"));
     private static final java.util.Set<String> WIRED_VOTER_TOPICS =
             new java.util.HashSet<>(java.util.Arrays.asList(
-                    "buck_charge_curr", "buck_input", "div1_single", "div1_multi",
+                    // buck_charge_curr 是有线/无线共用的 FCC votable，不能在任一单侧
+                    // 断开时整体清掉；前端按会话时间确认它是否属于当前路径。
+                    "buck_input", "div1_single", "div1_multi",
                     "div2_single", "div2_multi", "div4_single", "div4_multi",
                     "single_chg_cur", "multi_chg_cur", "quick_chg_disable", "quick_chg_en"));
     private String lastError = "";
@@ -415,6 +419,9 @@ public final class SnapshotCollector {
                 // 有线 track：usb online / real_type changed 边界
                 if (cpState.optBoolean("d_boundary", false)) {
                     lastWiredState = cpState.optString("d_state", "unknown");
+                    if (!cpState.isNull("d_boundary_at")) {
+                        lastWiredSessionMs = cpState.getLong("d_boundary_at");
+                    }
                     lastWiredCpRatio = cpState.isNull("d_ratio") ? null : cpState.getInt("d_ratio");
                     lastWiredCurCp = cpState.optBoolean("d_cur_cp", false);
                     lastWiredBuck = cpState.optBoolean("d_buck", false);
@@ -515,6 +522,8 @@ public final class SnapshotCollector {
                 String value = next.optString(field, "");
                 if (!value.isEmpty()) block.put(field, value);
             }
+            long at = next.optLong("at", 0L);
+            if (at > 0L) block.put("at", at);
             for (String field : new String[]{"changed", "result"}) {
                 Object value = next.opt(field);
                 if (value != null && value != JSONObject.NULL) {
@@ -564,6 +573,7 @@ public final class SnapshotCollector {
                         ? lastWiredCpRatio : JSONObject.NULL)
                 .put("active", "cp".equals(wstate))
                 .put("cur_work_cp", lastWiredCurCp)
+                .put("session_at", lastWiredSessionMs == null ? 0L : lastWiredSessionMs.longValue())
                 .put("cur_max", lastWiredCurMax == null ? JSONObject.NULL : lastWiredCurMax)
                 .put("stage_cur_max", lastWiredStageCurMax == null
                         ? JSONObject.NULL : lastWiredStageCurMax));
@@ -594,6 +604,7 @@ public final class SnapshotCollector {
             core.put("derived", derived);
         }
         JSONObject path = new JSONObject();
+        path.put("session_at", lastWlsSessionMs == null ? 0L : lastWlsSessionMs.longValue());
         if (lastWlsIcl != null) {
             path.put("wireless_icl", lastWlsIcl)
                     .put("wireless_icl_time", lastWlsIclLogTime == null ? "" : lastWlsIclLogTime)
@@ -923,6 +934,12 @@ public final class SnapshotCollector {
         double usbVbusMv = optNum(usbRaw, "VOLTAGE_NOW") / 1000.0;
         double usbIbusMa = optNum(usbRaw, "CURRENT_NOW") / 1000.0;
         double cpIbusTotalMa = nodeNum(nodesObj.optJSONObject("ibus_total"));
+        // SIC-BAT 的实时 PID 输出是独立于 div/buck votable 的有线热控层。
+        // 节点原始单位为 µA；0 表示当前未施加可用的 SIC 上限，不能拿来压低结果。
+        double wiredSicLimitMa = nodeNum(nodesObj.optJSONObject("wired_chg_curr")) / 1000.0;
+        if (Double.isFinite(wiredSicLimitMa) && wiredSicLimitMa > 0.0) {
+            putFinite(derived, "wired_sic_limit_ma", wiredSicLimitMa);
+        }
         boolean wirelessSignal = Double.isFinite(vout) && Double.isFinite(iout)
                 && vout > 1000.0 && iout > 100.0;
         // ONLINE=0 是有线硬否决；只有字段未知时才允许 VBUS 回退。
@@ -1336,8 +1353,9 @@ public final class SnapshotCollector {
                 String topic = m.group(1);
                 Matcher tm = VOTE_TIME_RE.matcher(line);
                 String time = tm.find() ? shiftLogTime(tm.group(1)) : "";
+                long at = time.isEmpty() ? 0L : absLogMs(lastLogFname, time);
                 current = new JSONObject()
-                        .put("topic", topic).put("time", time)
+                        .put("topic", topic).put("time", time).put("at", at)
                         .put("unit", VOTE_UNITS.getOrDefault(topic, ""))
                         .put("policy", VOTE_POLICIES.getOrDefault(topic, "UNKNOWN"))
                         .put("changed", changesByTopic.get(topic) != null
@@ -1837,6 +1855,7 @@ public final class SnapshotCollector {
         int dCurCpSeq = -1;
         boolean dBuck = false;
         boolean dBoundary = false;
+        Long dBoundaryAt = null;
         boolean dCtx = false;
         JSONObject dCurMax = null;
         JSONObject dStageCurMax = null;
@@ -1859,6 +1878,10 @@ public final class SnapshotCollector {
                     || line.contains("real_type changed:")) {
                 lastBoundaryKind = "wired";
                 dBoundary = true;
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                String raw = tm.find() ? tm.group(1) : "";
+                dBoundaryAt = raw.isEmpty() ? null
+                        : Long.valueOf(absLogMs(lastLogFname, shiftLogTime(raw)));
                 dMode = null;
                 dModeSeq = -1;
                 dRatio = null;
@@ -1999,6 +2022,7 @@ public final class SnapshotCollector {
                 .put("w_decision", wDecision == null ? JSONObject.NULL : wDecision)
                 .put("w_boundary", wBoundary)
                 .put("d_state", dState)
+                .put("d_boundary_at", dBoundaryAt == null ? JSONObject.NULL : dBoundaryAt.longValue())
                 .put("d_ratio", dRatio == null ? JSONObject.NULL : dRatio)
                 .put("d_cur_cp", dCurCp)
                 .put("d_buck", dBuck)
