@@ -2,7 +2,14 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.22（versionCode 69）**。
+当前版本：**v0.11.23（versionCode 70）**。
+
+## v0.11.23 重点改进
+
+- `chg_enable` 只接受当前有线会话内、且仍有启用票的驱动 effective；旧 OFF 票不再影响停充后的输入测量源。
+- 无线 Buck 输入 ICL 总览与详情统一只认有效 effective；无 effective 时显示待捕获，不用 MIN 推算或 CP 的 `wireless_qc` 残留冒充当前 ICL。
+- `session_at=0` 时不再采用缓存的 `buck_charge_curr`，避免无法证明会话归属时显示旧 FCC。
+- 有线 CP 温控证据同时核对当前比例的 single/multi 表，异值时明确提示拓扑待确认。
 
 ## v0.11.22 重点改进
 
