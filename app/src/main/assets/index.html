@@ -955,7 +955,7 @@ function renderVoters(d) {
   // 首页的“当前限制”只接受驱动实际发布的 effective；没有 effective 时，
   // 详情可以展示理论 MIN/MAX，但不能把推算值冒充执行层仲裁结果。
   const effectiveOnly = b => {
-    if (!resultValid(b) || !(b.rows || []).some(r => r.enable === 1)) return null;
+    if (!b || !resultValid(b) || !(b.rows || []).some(r => r.enable === 1)) return null;
     return { client: b.result.client, value: b.result.value, calc: false };
   };
   const summary = [];
