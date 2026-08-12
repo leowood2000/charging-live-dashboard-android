@@ -2,7 +2,12 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.23（versionCode 70）**。
+当前版本：**v0.11.24（versionCode 71）**。
+
+## v0.11.24 重点改进
+
+- 修复启动首轮日志尚未捕获 `wireless_buck_input` 时，前端读取空投票对象导致“快照解析失败”的瞬态报错。
+- 空投票主题现在安全显示为待捕获，后续日志到达后正常恢复，不再污染实时数据页面。
 
 ## v0.11.23 重点改进
 
