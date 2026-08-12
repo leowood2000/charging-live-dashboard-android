@@ -952,6 +952,12 @@ function renderVoters(d) {
     }
     return null;
   };
+  // 首页的“当前限制”只接受驱动实际发布的 effective；没有 effective 时，
+  // 详情可以展示理论 MIN/MAX，但不能把推算值冒充执行层仲裁结果。
+  const effectiveOnly = b => {
+    if (!resultValid(b) || !(b.rows || []).some(r => r.enable === 1)) return null;
+    return { client: b.result.client, value: b.result.value, calc: false };
+  };
   const summary = [];
   const addSummary = (label, eff, fmt) => {
     if (!eff) return;
@@ -967,7 +973,7 @@ function renderVoters(d) {
   // 避免切换时把另一输入源或 CP 阶段的旧 FCC 当成当前上限。
   const topicCurrentSession = (block, sessionAt) => {
     const session = Number(sessionAt || 0);
-    if (!session) return true; // 兼容旧后端快照
+    if (!session) return false; // 无会话边界不能证明是当前 FCC，宁可待捕获
     const at = Number(block && block.at);
     return Number.isFinite(at) && at >= session;
   };
@@ -1143,7 +1149,7 @@ function renderVoters(d) {
       // 无线仍连接时恢复显示 Buck/PMIC 旁路 ICL。
       const wCpState = wirelessPath.state || (buck && buck.cp_state);
       const bypassPower = ceStopping || ceStopped;
-      const wbiCandidate = effectiveOf(buck);
+      const wbiCandidate = effectiveOnly(buck);
       // wireless_qc 是 CP 建链期间投到 Buck 支路的绝对 ICL；路径已经判为 Buck
       // 后若日志仍残留该 winner，不能把它当成当前 Buck 输入上限。
       const wbiEff = wbiCandidate && wbiCandidate.client !== "wireless_qc"
@@ -1247,14 +1253,24 @@ function renderVoters(d) {
   // thermal/jeita 票，否则有线与无线切换后会把另一支路的历史票标成“当前限制”。
   const activeThermalRow = block => (block && block.rows || []).find(r =>
     r.enable === 1 && /thermal|jeita/i.test(r.client));
+  const activeThermalRows = (...blocks) => blocks.flatMap(block =>
+    (block && block.rows || []).filter(r => r.enable === 1 && /thermal|jeita/i.test(r.client)));
   const thermalParts = [];
   if (chargingNow && wiredActive) {
     const wcp = (d.derived && d.derived.wired_cp) || {};
     if (wcp.state === "cp") {
       const suffix = wcp.ratio === 4 ? "4" : wcp.ratio === 2 ? "2" : wcp.ratio === 1 ? "1" : null;
-      const block = suffix ? topics[`div${suffix}_single`] : null;
-      const row = activeThermalRow(block);
-      if (row) thermalParts.push(`MONITOR ${row.client} ${row.value}mA`);
+      const single = suffix ? topics[`div${suffix}_single`] : null;
+      const multi = suffix ? topics[`div${suffix}_multi`] : null;
+      const rows = activeThermalRows(single, multi);
+      if (rows.length === 1) {
+        thermalParts.push(`MONITOR ${rows[0].client} ${rows[0].value}mA`);
+      } else if (rows.length > 1) {
+        const same = rows.every(r => r.client === rows[0].client && r.value === rows[0].value);
+        thermalParts.push(same
+          ? `MONITOR ${rows[0].client} ${rows[0].value}mA (single/multi)`
+          : `MONITOR ${rows.map(r => `${r.client} ${r.value}mA`).join(" / ")} · 拓扑待确认`);
+      }
     } else if (wcp.state === "buck") {
       const block = topicCurrentSession(topics.buck_charge_curr, wcp.session_at)
         ? topics.buck_charge_curr : null;
@@ -1342,7 +1358,7 @@ function renderVoters(d) {
       ? ` · 最近变动 ${esc(b.changed.client)} ${b.changed.enabled ? "on" : "off"} → ${b.changed.value}${b.changed.time ? " @ " + b.changed.time : ""}`
       : "";
     let resultText = "";
-    const displayResultValid = resultValid(b)
+    const displayResultValid = (t === "wireless_buck_input" ? effectiveOnly(b) !== null : resultValid(b))
       && !(t === "wireless_buck_input" && b.result.client === "wireless_qc");
     if (displayResultValid) {
       resultText = `<span class="vote-result result-line" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +

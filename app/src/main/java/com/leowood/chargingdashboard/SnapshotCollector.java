@@ -228,8 +228,6 @@ public final class SnapshotCollector {
                 JSONObject voters = parseVotes(voteLog);
                 if (voters.length() > 0) {
                     lastVoters = mergeVoteTopics(lastVoters, voters);
-                    Integer chg = effectiveVoteValue(lastVoters, "chg_enable");
-                    if (chg != null) lastChgEnabled = chg;
                 }
             }
             if (sessionReadOk) {
@@ -333,6 +331,7 @@ public final class SnapshotCollector {
                 // 新会话/协议变化后尚无遥测时清空缓存并标记等待，页面回退 USB uevent
                 if (isWiredDisconnected(ppLog)) {
                     lastVoters = clearVoteTopics(lastVoters, WIRED_VOTER_TOPICS);
+                    lastChgEnabled = null;
                     lastWiredCpTel = null;
                     lastWiredBuckTel = null;
                     lastWiredTelWaiting = false;
@@ -465,6 +464,10 @@ public final class SnapshotCollector {
                     }
                 }
             }
+            // chg_enable 是共享主题，但停充输入测量只能使用“当前有线会话”内、
+            // 且仍有启用票的 effective；日志滑窗缺失/旧会话结果一律视为未知。
+            long chgSessionAt = lastWiredSessionMs == null ? 0L : lastWiredSessionMs;
+            lastChgEnabled = effectiveVoteValue(lastVoters, "chg_enable", chgSessionAt);
             // 三条通道独立 stale：功率路径失败不拖累 session/vote 主链路
             logsStale = !voteReadOk || !sessionReadOk;
             powerPathLogsStale = !ppReadOk;
@@ -1386,10 +1389,26 @@ public final class SnapshotCollector {
         return blocks;
     }
 
-    private static Integer effectiveVoteValue(JSONObject voters, String topic) {
+    private static Integer effectiveVoteValue(JSONObject voters, String topic, long sessionAt) {
         JSONObject block = voters.optJSONObject(topic);
-        JSONObject result = block == null ? null : block.optJSONObject("result");
-        return result == null || !result.has("value") ? null : result.optInt("value");
+        if (block == null || sessionAt <= 0L) return null;
+        JSONArray rows = block.optJSONArray("rows");
+        boolean hasEnabled = false;
+        if (rows != null) {
+            for (int i = 0; i < rows.length(); i++) {
+                if (rows.optJSONObject(i) != null
+                        && rows.optJSONObject(i).optInt("enable", 0) == 1) {
+                    hasEnabled = true;
+                    break;
+                }
+            }
+        }
+        if (!hasEnabled) return null;
+        JSONObject result = block.optJSONObject("result");
+        if (result == null || !result.has("value")) return null;
+        long resultAt = result.optLong("r_ms", block.optLong("at", 0L));
+        if (resultAt <= 0L || resultAt < sessionAt) return null;
+        return result.optInt("value");
     }
 
     private String shiftLogTime(String t) {
