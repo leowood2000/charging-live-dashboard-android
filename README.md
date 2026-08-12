@@ -2,7 +2,18 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.20（versionCode 67）**。
+当前版本：**v0.11.22（versionCode 69）**。
+
+## v0.11.22 重点改进
+
+- 修正同名 `xm_wls` 的解释：其语义由所在 votable 决定，`wireless_sw_qc_ich` 中的票属于无线 CP 软件电池电流限制。
+- 无线 Buck 隐藏 `wireless_sw_qc_ich/wireless_sw_thermal_ich/wls_single/multi_chg_cur`；无线 CP 保留这些 CP 票并隐藏 Buck 票。
+
+## v0.11.21 重点改进
+
+- 按有线 CP、有线 Buck、无线 CP、无线 Buck 四路硬隔离当前限制和投票详情，禁止跨路径旧票混入。
+- 无线 CP 隐藏 `wireless_buck_input`/`buck_charge_curr`；无线 Buck 隐藏 Quick Wireless CP 决策，并过滤 CP 残留 `wireless_qc` 票。
+- 正向确认 `xm_wls/wls_icl` 属于 Buck/PMIC 无线输入支路，`buck_charge_curr` 的执行回调属于 Buck ICHG；修正旧文档中的能力票、下降量等错误解释。
 
 ## v0.11.20 重点改进
 
@@ -15,7 +26,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 ## v0.11.19 重点改进
 
 - 有线 CP/Buck 的首页电池上限合并 MONITOR-BAT 路径票与 SIC-BAT `wired_chg_curr`，显示为有线热控上限，不再把单一分压票误称为完整上限。
-- `buck_charge_curr` 作为有线/无线共用 topic 增加会话时间归属检查，切换输入源时宁可显示“待捕获”，也不复用另一支路的旧 FCC。
+- `buck_charge_curr` 作为有线 Buck/无线 Buck 共用 topic 增加会话时间归属检查，切换输入源时宁可显示“待捕获”，也不复用另一支路的旧 FCC。
 - “温度与热控”摘要改为仅从当前输入源/功率路径取证；Android 前端以 `input_source` 为准，不再受残留 `wired_online` 覆盖。
 
 ## v0.11.18 重点改进
@@ -59,7 +70,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 ### 更紧凑、层次更清楚的界面
 
 - 实时数据压缩为输入功率、电池功率、电池电流、电池电压、电池温度和 SOC。
-- “当前限制”固定顺序：充电路径最先；当前电池充电电流上限与实际电池电流组成一组；无线 CP 显示 RX 允许上限与实际 RX，Buck/旁路显示无线输入 ICL 与实际 RX；温度、场景和使能状态随后展示。
+- “当前限制”固定顺序：充电路径最先；当前电池充电电流上限与实际电池电流组成一组；无线 CP 显示 RX 允许上限与实际 RX，无线 Buck/旁路显示 Buck 输入 ICL 与实际 RX；温度、场景和使能状态随后展示。
 - 电池上限尚未捕获时保留 `-- / 待捕获`，避免数据缺失时整项消失。
 - 私有快充、无线策略、有线策略和实时会话档案默认折叠。
 - 四条曲线依次为：电池电流、输入电流、输入电压、输入功率。
@@ -76,11 +87,13 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 - 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP/Buck 将当前 MONITOR-BAT 路径票（`div1/div2/div4` 或 `buck_charge_curr`）与 SIC-BAT `wired_chg_curr` 的动态上限取较小值，作为“有线热控上限”。协议、曲线和安全等其他驱动算法层不被伪装成此字段。路径或 single/multi 拓扑不能唯一确定时显示“待确认”。
 - 从有线切换到无线时，实时输入源优先于残留 USB ONLINE/有线 CP 日志，避免无线慢充沿用上一段有线 CP 路径。
 - 无线 CP 总览显示 `RX 输出允许上限` 与 `实际 RX 输出` 两行；两行分别使用与电池上限/实际电流相同的主次高亮颜色。
-- 无线停充但仍在旁路供电时，保留当前会话的 `无线输入 ICL（旁路）`；电池充电上限显示为 `-- / 已停止`。
-- 无线 Buck/旁路输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；无线 CP 的 RX 允许上限取当前会话 `rx_iout_limit`；实际 RX 输出取 `wls_debug iout`，属于遥测。各字段处于不同控制域，不做数值一致性判断。
-- `wireless_qc=100` 表示策略修正/下降量语义，不能解释为“最终输入限流为 100mA”，也不能作为最终无线输入 ICL。
-- `xm_wls` 是能力/适配器允许值，不等同当前仲裁 winner。
-- `rx_iout_limit` 是驱动策略层的 RX 允许上限，和实际 RX 输出、上游 ICL 是不同层级。
+- 无线停充但仍在旁路供电时，显示 `无线 Buck ICL（旁路）`；电池充电上限显示为 `-- / 已停止`。
+- 无线 Buck/旁路输入 ICL 取 `wireless_buck_input effective`，经 `strategy_wireless_set_input_curr_limit` 下发 Buck/PMIC 无线输入支路；无线 CP 的 RX 允许上限取当前会话 `rx_iout_limit`，实际 RX 输出取 `wls_debug iout`。CP 页面不显示 Buck 输入票，Buck 页面不显示 Quick Wireless CP 决策。
+- `wireless_qc=100` 是 Quick Wireless 在 CP 生命周期内投给 `wireless_buck_input` 的绝对 100mA 票，用于压低并行 Buck/PMIC 支路；它不是“降低 100mA”，也不是 CP/RX 主链路输入上限。CP 停止时驱动会在关闭 CP 后撤销该票。
+- 客户端名 `xm_wls` 会被复用于不同 votable，必须连 topic 一起解释：`xm_wls @ wireless_buck_input` 是 Buck 输入 ICL 票；`xm_wls @ buck_charge_curr` 是 Buck FCC 票；`xm_wls @ wireless_sw_qc_ich` 是无线 CP 的 `sw_qc_ichg` 软件电池电流票，参与 Quick Wireless `select_max_ibat`。同名不代表同一限制层。
+- `rx_iout_limit` 是无线 CP 路径的 RX 输出策略允许上限；`tx_adapter_max` 是 TX 适配器能力换算后的 Quick Wireless 电池侧 ceiling。手机侧没有解析到可直接显示为“TX 线圈电流上限”的统一字段。
+- `buck_charge_curr` 由 `mca_strategy_buckchg` 创建，仲裁回调 `strategy_buckchg_charge_limit` 最终调用 `platform_class_buckchg_ops_set_ichg`，确定属于 Buck 充电器电池侧电流限制。无线基础模块与有线 JEITA/Buck 策略会向同一个全局 votable 投票，但 CP 活跃时不把它作为当前 CP 电池上限。
+- 有线/无线与 Buck/CP 按四路过滤：有线 CP 只显示当前 `div1/div2/div4` 与 CP 实测，有线 Buck 只显示 `buck_input/buck_charge_curr` 和当前 5V/9V 档，无线 CP 只显示 Quick Wireless、`wireless_sw_qc_ich/wireless_sw_thermal_ich/wls_single/multi_chg_cur` 与 RX 限制，无线 Buck 只显示 `wireless_buck_input/buck_charge_curr`。
 
 ## 截图
 
@@ -88,7 +101,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 
 ## 安装
 
-1. 从 [Releases](https://github.com/leowood2000/charging-live-dashboard-android/releases) 下载 `charging-live-dashboard-android-v0.11.17.apk`。
+1. 从 [Releases](https://github.com/leowood2000/charging-live-dashboard-android/releases) 下载最新版 APK。
 2. 安装并打开应用。
 3. 在 KernelSU / Magisk 中授予 root 权限。
 

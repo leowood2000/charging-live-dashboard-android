@@ -796,6 +796,10 @@ function renderVoters(d) {
     "div1_single", "div1_multi", "div2_single", "div2_multi",
     "div4_single", "div4_multi", "single_chg_cur", "multi_chg_cur", "thermal_flip",
   ]);
+  const WIRELESS_CP_TOPICS = new Set([
+    "wireless_sw_qc_ich", "wireless_sw_thermal_ich",
+    "wls_single_chg_cur", "wls_multi_chg_cur",
+  ]);
   // 当前输入源：wired / wireless / none（由后端按功率路径选择，vrect 仅兼容旧接口兜底）
   const inputSrc = d.derived && d.derived.input_source;
   const wirelessActive = inputSrc
@@ -809,6 +813,10 @@ function renderVoters(d) {
     ? !!d.derived.wireless_connected : wirelessActive;
   // 有线优先；无线连接但当前 RX 很小/为 0 时仍保留旁路上下文。
   const wirelessContext = !wiredActive && wirelessConnected;
+  const wirelessPath = (d.derived && d.derived.wireless_path) || {};
+  const wirelessPathState = wirelessPath.state
+    || (topics.wireless_buck_input && topics.wireless_buck_input.cp_state)
+    || "unknown";
   // 是否真正在充电：以 battery STATUS 为准（缺失时保守显示）
   const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
   const chargingNow = battSt === "" ? true : battSt === "charging";
@@ -851,6 +859,19 @@ function renderVoters(d) {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
     if (t === "quick_chg_disable" && wirelessContext) return false;      // 无线连接时隐藏有线快充禁用
     if (t === "wls_quick_chg_disable" && !wirelessContext) return false; // 非无线连接时隐藏无线快充禁用
+    if (wirelessContext) {
+      // 无线页面不得展示任何有线专用输入/分压/档位表。
+      if (t === "buck_input" || WIRED_PRESET_TOPICS.has(t) || WIRED_CP_TOPICS.has(t)) return false;
+      // 无线 CP 与 Buck 是两条不同功率路径。CP 下 wireless_buck_input（含
+      // xm_wls / wireless_qc / wls_icl）只管理并行 Buck/PMIC 支路，不能冒充
+      // RX/CP 输入限制；Buck 下也不能展示 Quick Wireless 的 CP 电池决策。
+      if (wirelessPathState === "cp"
+          && (t === "wireless_buck_input" || t === "buck_charge_curr")) return false;
+      if (wirelessPathState === "buck" && WIRELESS_CP_TOPICS.has(t)) return false;
+      if ((wirelessPathState === "unknown" || wirelessPathState === "transition")
+          && (t === "wireless_buck_input" || t === "buck_charge_curr"
+              || WIRELESS_CP_TOPICS.has(t))) return false;
+    }
     if (WIRED_PRESET_TOPICS.has(t)) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
       const vbus = Number(d.derived && d.derived.input_voltage_mv);
@@ -863,8 +884,9 @@ function renderVoters(d) {
     if (wiredActive) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
       const wiredPathFresh = !(d.meta && d.meta.power_path_logs_stale);
-      // 无线相关表有线时无效
-      if (t.startsWith("wireless_")) return false;
+      // 无线相关表有线时无效；wls_single/multi 不带 wireless_ 前缀，
+      // 也必须通过显式集合隔离，不能依赖名称前缀。
+      if (t.startsWith("wireless_") || WIRELESS_CP_TOPICS.has(t)) return false;
       if (wcp.state === "cp") {
         // 有线 CP 激活：只保留对应比例的 div 卡 + single/multi/thermal_flip
         if (WIRED_CP_TOPICS.has(t)) {
@@ -886,9 +908,13 @@ function renderVoters(d) {
       }
     }
     const b = topics[t];
-    const hasEnabled = (b.rows || []).some(r => r.enable === 1);
+    const visibleRows = t === "wireless_buck_input" && wirelessContext
+      ? (b.rows || []).filter(r => r.client !== "wireless_qc") : (b.rows || []);
+    const hasEnabled = visibleRows.some(r => r.enable === 1);
+    const hasVisibleResult = b.result && b.result.client && b.result.client !== "(null)"
+      && !(t === "wireless_buck_input" && b.result.client === "wireless_qc");
     return hasEnabled
-        || (b.result && b.result.client && b.result.client !== "(null)" && !(b.rows && b.rows.length));
+        || (hasVisibleResult && !visibleRows.length);
   });
   const jeitaVolt = topics.term_volt;
   const jeitaCurr = topics.term_curr;
@@ -936,9 +962,9 @@ function renderVoters(d) {
       `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
   };
   const buck = topics.wireless_buck_input;
-  const wirelessPath = (d.derived && d.derived.wireless_path) || {};
-  // buck_charge_curr 是有线/无线共用 topic。增量缓存允许它长期存在，但首页只能
-  // 使用本次输入会话之后出现过的表，避免切换时把另一条支路的 FCC 当成当前上限。
+  // buck_charge_curr 是有线 Buck / 无线 Buck 共用的全局 Buck ICHG topic。
+  // 增量缓存允许它长期存在，但首页只能在 Buck 路径使用本次输入会话后的表，
+  // 避免切换时把另一输入源或 CP 阶段的旧 FCC 当成当前上限。
   const topicCurrentSession = (block, sessionAt) => {
     const session = Number(sessionAt || 0);
     if (!session) return true; // 兼容旧后端快照
@@ -1112,16 +1138,16 @@ function renderVoters(d) {
         }
       }
     } else if (wirelessContext) {
-      // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
-      // Buck 总览显示 wireless_buck_input + 实际 RX；CP 总览显示 RX 允许上限 + 实际 RX。
-      // 停充但无线仍连接时属于旁路供电：保留当前会话 ICL，并明确标注“旁路”，
-      // 但不把它当作电池充电或 CP 的直接 RX 限流值。
+      // wireless_buck_input 是 Buck/PMIC 无线输入支路：Buck 总览显示其 ICL；
+      // CP 总览只显示 RX 允许上限，完全隐藏 Buck 支路票。停充后 CP 已退出，
+      // 无线仍连接时恢复显示 Buck/PMIC 旁路 ICL。
       const wCpState = wirelessPath.state || (buck && buck.cp_state);
       const bypassPower = ceStopping || ceStopped;
-      const wlsIclValue = Number.isFinite(Number(wirelessPath.wireless_icl))
-        ? Number(wirelessPath.wireless_icl) : null;
-      const wbiEff = effectiveOf(buck) || (wlsIclValue !== null
-        ? { client: "wireless_buck_input", value: wlsIclValue, calc: false } : null);
+      const wbiCandidate = effectiveOf(buck);
+      // wireless_qc 是 CP 建链期间投到 Buck 支路的绝对 ICL；路径已经判为 Buck
+      // 后若日志仍残留该 winner，不能把它当成当前 Buck 输入上限。
+      const wbiEff = wbiCandidate && wbiCandidate.client !== "wireless_qc"
+        ? wbiCandidate : null;
       const showWbiSummary = wCpState !== "cp" || bypassPower;
       if (wbiEff) {
         const smartStop = wbiEff.client === "soc_limit"
@@ -1130,12 +1156,12 @@ function renderVoters(d) {
         if (showWbiSummary) {
           const bypassNote = bypassPower
             ? (ceStopping ? "停充中 · 旁路输入策略" : "电池已停止 · 旁路输入策略") : "";
-          const label = bypassPower ? "无线输入 ICL（旁路）" : "无线输入 ICL";
-          summary.push(`<span class="chip" title="wireless_buck_input effective → strategy_wireless_set_input_curr_limit → ADSP prop 0x1003（上游无线平台输入策略）；${bypassPower ? "无线仍连接时保留作旁路供电参考，不代表电池充电上限" : "EPP+/QC 下与 RX iout 的映射未闭环，不做数值一致性比较"}${smartStop && !bypassPower ? "；SmartEndura/soc_limit 当前上游限制" : ""}">` +
-            `${label}<b>${fmt(wbiEff.value, 0)}mA</b><small>${bypassNote || (smartStop ? "当前上游策略" : "上游平台策略")}</small></span>`);
+          const label = bypassPower ? "无线 Buck ICL（旁路）" : "无线 Buck 输入 ICL";
+          summary.push(`<span class="chip" title="wireless_buck_input effective → strategy_wireless_set_input_curr_limit → Buck/PMIC 无线输入支路 → ADSP prop 0x1003；${bypassPower ? "无线仍连接时作为停充后的系统供电支路参考" : "当前 Buck 路径输入限流"}${smartStop && !bypassPower ? "；SmartEndura/soc_limit 当前限制" : ""}">` +
+            `${label}<b>${fmt(wbiEff.value, 0)}mA</b><small>${bypassNote || (smartStop ? "当前 Buck 策略" : "Buck/PMIC 支路")}</small></span>`);
         }
       } else if (showWbiSummary) {
-        summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">${bypassPower ? "无线输入 ICL（旁路）" : "无线输入 ICL"}<b>--</b><small>待捕获</small></span>`);
+        summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">${bypassPower ? "无线 Buck ICL（旁路）" : "无线 Buck 输入 ICL"}<b>--</b><small>待捕获</small></span>`);
       }
       // 无线路径：电池侧 ceiling 按当前功率路径选择——
       // CP 生效 → quick wireless cur_max:[Final]（算法决策，允许上限，带年龄）
@@ -1181,8 +1207,8 @@ function renderVoters(d) {
           summary.push(`<span class="chip" title="Buck 路径已确认，但尚未捕获 buck_charge_curr effective">当前电池充电电流上限<b>--</b><small>待捕获</small></span>`);
         }
         // 无线热控上限（Buck）：直接取 buck_charge_curr 中唯一启用的 wireless_thermal_XXw
-        const wThermalRowsB = topicCurrentSession(topics.buck_charge_curr, wirelessPath.session_at)
-          ? (topics.buck_charge_curr && topics.buck_charge_curr.rows || []) : []
+        const wThermalRowsB = (topicCurrentSession(topics.buck_charge_curr, wirelessPath.session_at)
+          ? (topics.buck_charge_curr && topics.buck_charge_curr.rows || []) : [])
           .filter(r => /^wireless_thermal_(20|30|50|80)w$/.test(r.client) && r.enable === 1 && r.value > 0);
         if (wThermalRowsB.length === 1) {
           const wtb = wThermalRowsB[0];
@@ -1263,7 +1289,7 @@ function renderVoters(d) {
     if (/充电路径|当前功率路径/.test(html)) return 0;
     if (/当前电池充电电流上限|有线电池充电上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) return 10;
     if (/实际电池电流/.test(html)) return 20;
-    if (/无线(?:平台)?输入 ICL|有线输入限流|RX 输出允许上限/.test(html)) return 30;
+    if (/无线 Buck (?:输入 )?ICL|有线输入限流|RX 输出允许上限/.test(html)) return 30;
     if (/有线输入实测/.test(html)) return 40;
     if (/实际 RX 输出|实际输入电流/.test(html)) return 40;
     if (/温度与热控|无线热控上限/.test(html)) return 50;
@@ -1274,7 +1300,7 @@ function renderVoters(d) {
   const decorateSummary = html => {
     let cls = "";
     if (/充电路径|当前功率路径/.test(html)) cls = "summary-path";
-    else if (/无线(?:平台)?输入 ICL|有线输入限流|RX 输出允许上限/.test(html)) cls = "summary-primary summary-input-limit";
+    else if (/无线 Buck (?:输入 )?ICL|有线输入限流|RX 输出允许上限/.test(html)) cls = "summary-primary summary-input-limit";
     else if (/当前电池充电电流上限|有线电池充电上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) cls = "summary-primary";
     else if (/实际 RX 输出|实际输入电流/.test(html)) cls = "summary-secondary summary-input-actual";
     else if (/有线输入实测/.test(html)) cls = "summary-secondary summary-input-actual";
@@ -1302,7 +1328,11 @@ function renderVoters(d) {
     .concat(relevant.filter(t => !order.includes(t)));
   const cards = sorted.map(t => {
     const b = topics[t];
-    const rows = b.rows || [];
+    const rawRows = b.rows || [];
+    // wireless_qc 只用于 CP 生命周期中压低并行 Buck 支路。CP 时整张卡隐藏；
+    // Buck 时也不把这张已撤销/残留的 CP 管理票列入 Buck 输入票。
+    const rows = t === "wireless_buck_input"
+      ? rawRows.filter(r => r.client !== "wireless_qc") : rawRows;
     const activeRows = rows.filter(r => r.enable === 1);
     const inactiveRows = rows.filter(r => r.enable !== 1);
     const active = activeRows.length;
@@ -1312,7 +1342,9 @@ function renderVoters(d) {
       ? ` · 最近变动 ${esc(b.changed.client)} ${b.changed.enabled ? "on" : "off"} → ${b.changed.value}${b.changed.time ? " @ " + b.changed.time : ""}`
       : "";
     let resultText = "";
-    if (resultValid(b)) {
+    const displayResultValid = resultValid(b)
+      && !(t === "wireless_buck_input" && b.result.client === "wireless_qc");
+    if (displayResultValid) {
       resultText = `<span class="vote-result result-line" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +
         `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}</span>`;
     } else if (t === "wireless_buck_input") {
@@ -1334,10 +1366,11 @@ function renderVoters(d) {
       resultText = `<span class="vote-result calc" title="未捕获驱动 effective 行，且该主题仲裁类型未知，不做推算">未捕获驱动 effective 行</span>`;
     }
     let iclText = "";
-    if (b.icl !== undefined && b.icl !== null) {
+    if (b.icl !== undefined && b.icl !== null
+        && !(t === "wireless_buck_input" && (!displayResultValid || b.result.client === "wireless_qc"))) {
       const ago = b.icl_at ? Math.max(0, Math.round((Date.now() - b.icl_at) / 1000)) : null;
-      iclText = `<span class="vote-result" title="strategy_wireless_set_input_curr_limit 经 platform_class_buckchg_ops_set_wls_input_curr_lmt 下发 ADSP prop 0x1003；闭源固件如何应用不可见，不等同 RX 输出电流上限">` +
-        `无线平台输入 ICL <b>${b.icl}</b>mA<small>ADSP prop 0x1003` +
+      iclText = `<span class="vote-result" title="strategy_wireless_set_input_curr_limit 经 platform_class_buckchg_ops_set_wls_input_curr_lmt 下发 ADSP prop 0x1003；这是 Buck/PMIC 无线输入支路 ICL，不等同 RX/CP 输入限制">` +
+        `Buck 输入 ICL <b>${b.icl}</b>mA<small>ADSP prop 0x1003` +
         `${b.icl_time ? " · " + esc(b.icl_time) : ""}${ago !== null ? " · " + ago + "s前" : ""}</small></span>`;
     }
     let ioutText = "";
@@ -1348,24 +1381,21 @@ function renderVoters(d) {
     if (t === "wireless_buck_input") {
       const wm = b.wls_mode;
       if (wm === "bpp_drawload") {
-        modeText = `<span class="vote-result" title="BPP drawload 控制环（仅模式标识，不据此做 ICL/iout 一致性判定）">控制模式 <b>BPP · drawload</b></span>`;
+        modeText = `<span class="vote-result" title="BPP drawload 的 Buck 输入控制环">控制模式 <b>BPP · drawload</b><small>Buck 支路</small></span>`;
       } else if (wm === "epp_qc") {
-        modeText = `<span class="vote-result" title="EPP+/QC：wls_icl 经 0x1003 下发 ADSP，与 wls_debug iout 属不同链路，不做数值比较">控制模式 <b>EPP+/QC</b><small>wls_icl 与 iout 不同链路</small></span>`;
+        modeText = `<span class="vote-result" title="当前卡只描述 EPP+/QC 下仍存在的 Buck/PMIC 并行输入支路；CP 主链路不展示本卡">控制模式 <b>EPP+/QC</b><small>Buck/PMIC 支路</small></span>`;
       } else {
         modeText = `<span class="vote-result" title="无线控制模式未知">控制模式 <b>待确认</b></span>`;
       }
-      // 反编译结论：该值是真实 mA 的 wls_icl，已下发 ADSP（prop 0x1003）；
-      // 不再用 ICL 与 iout 做“生效/未生效”判定，也不随 work_mode 失效
+      // 反编译结论：该值是 Buck/PMIC 支路的绝对 mA ICL，已下发 ADSP
+      // prop 0x1003。CP 主链路不展示本卡；停充旁路时重新使用。
       if (b.chg_en === 0) {
         modeText += `<span class="vote-result">chg_en <b>0</b><small>当前充电暂停，ICL 非当前瓶颈</small></span>`;
       }
-      modeText += `<span class="vote-result" title="反汇编证据：strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)">说明 <b>无线平台输入 ICL（上游）</b><small>ADSP prop 0x1003 · EPP+/QC 下与 RX iout 不同控制域，不做数值一致性比较</small></span>`;
+      modeText += `<span class="vote-result" title="反汇编证据：strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)">说明 <b>Buck/PMIC 支路 ICL</b><small>只在无线 Buck 或停充旁路展示</small></span>`;
       const xmWls = (b.rows || []).find(r => r.client === "xm_wls");
       if (xmWls && xmWls.enable === 1) {
-        modeText += `<span class="vote-result" title="xm_wls 是无线能力/适配器允许的最大输入电流票，不是当前仲裁 winner">无线能力票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;
-      }
-      if (b.rx_iout_limit !== null && b.rx_iout_limit !== undefined && b.rx_iout_limit_captured) {
-        modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层允许上限，未确认对应芯片寄存器）">RX 输出允许上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`;
+        modeText += `<span class="vote-result" title="xm_wls 是 wireless_buck_input 中的 Buck 输入基础策略票；仅当它成为 MIN 仲裁 winner 时才等于最终 wls_icl">Buck 基础票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;
       }
     }
     let buckPathNote = "";
@@ -1374,7 +1404,11 @@ function renderVoters(d) {
     }
     const topicLabels = {
       buck_charge_curr: "电池充电上限",
-      wireless_buck_input: "无线输入限制",
+      wireless_buck_input: "无线 Buck 输入限制",
+      wireless_sw_qc_ich: "无线 CP 软件电流上限",
+      wireless_sw_thermal_ich: "无线 CP 软件热控上限",
+      wls_single_chg_cur: "无线 CP 单泵电流",
+      wls_multi_chg_cur: "无线 CP 多泵电流",
       chg_enable: "充电使能",
       wls_quick_chg_disable: "无线快充保护",
       quick_chg_disable: "有线快充保护",
@@ -1408,11 +1442,12 @@ function renderVoters(d) {
       `<span class="vote-result">终止电流 <b>${jc === null || jc === undefined ? "-" : jc}</b><small>mA</small></span></div>` +
       `</div></details>`;
   }
-  // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），仅无线路径展示
+  // Quick Wireless 电池电流决策：仅 CP 主链路展示；Buck/停充旁路不沿用。
   let quickCard = "";
   const dec = wirelessPath.cur_max_decision || (buck && buck.cur_max_decision);
-  if (limitContext && wirelessContext && dec) {
-    const quickHistorical = ceStopped;
+  if (limitContext && wirelessContext && wirelessPathState === "cp"
+      && !ceStopping && !ceStopped && dec) {
+    const quickHistorical = false;
     const inputs = [
       ["channel_cur", dec.channel_cur],
       ["temp_max_cur", dec.temp_max_cur],
