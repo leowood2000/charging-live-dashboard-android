@@ -435,6 +435,10 @@ let lastGroupsJson = "";
 let lastVotersJson = "";
 let lastSessionsJson = "";
 let lastGroupsStruct = "";
+// 日志通道在轮询边界可能短暂返回空主题；保留同一输入会话的上一张限制卡，
+// 避免“当前限制”整卡闪空，再在新会话/路径真正变化时切换到待捕获。
+let lastLimitSummaryHtml = "";
+let lastLimitContextKey = "";
 
 const KPI = [
   { id: "input_power_w", label: "输入功率", unit: "W", digits: 2, hint: "当前输入 VBUS × IBUS（有线/无线自动切换）" },
@@ -770,13 +774,30 @@ function renderVoters(d) {
   const el = $("voteTopics");
   const topics = d.voters || {};
   const keys = Object.keys(topics);
+  const topDerived = d.derived || {};
+  const wiredCpTop = topDerived.wired_cp || {};
+  const wirelessPathTop = topDerived.wireless_path || {};
+  const limitContextKey = JSON.stringify({
+    input: topDerived.input_source || "",
+    wired: !!topDerived.wired_connected,
+    wireless: !!topDerived.wireless_connected,
+    wiredCp: [wiredCpTop.state || "", wiredCpTop.ratio || "", wiredCpTop.session_at || 0],
+    wirelessPath: [wirelessPathTop.state || "", wirelessPathTop.ratio || "", wirelessPathTop.session_at || 0],
+  });
   if (!keys.length) {
     const th = d.thermal || {};
-    $("limitSummary").innerHTML = `<div class="card wide"><div class="chips" style="justify-content:flex-start">` +
-      `<span class="chip summary-thermal"><span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
-      `<small>投票待加载</small></span>` +
-      `<span class="chip"><span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b><small>mi_thermald</small></span>` +
-      `</div></div>`;
+    const canRetain = lastLimitSummaryHtml && lastLimitContextKey === limitContextKey
+      && d.meta && d.meta.logs_stale;
+    if (canRetain) {
+      $("limitSummary").innerHTML = lastLimitSummaryHtml;
+      updateLimitLive(d);
+    } else {
+      $("limitSummary").innerHTML = `<div class="card wide"><div class="chips" style="justify-content:flex-start">` +
+        `<span class="chip summary-thermal"><span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
+        `<small>投票待加载</small></span>` +
+        `<span class="chip"><span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b><small>mi_thermald</small></span>` +
+        `</div></div>`;
+    }
     el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">最近日志</span></h2>` +
       `<p class="note">日志中暂无投票表输出。</p></div>`;
     return;
@@ -1051,9 +1072,12 @@ function renderVoters(d) {
     if (wiredSicLimit !== null) candidates.push({ value: wiredSicLimit, source: "SIC-BAT" });
     const selected = candidates.reduce((a, b) => b.value < a.value ? b : a);
     const detail = candidates.map(c => `${c.source} ${fmt(c.value, 0)}mA`).join(" · ");
-    const selectedSmall = selected.source === qcSource && qcAge !== null
-      ? `${selected.source} · ${qcAge}s前`
-      : `${selected.source} · ${qcSource.startsWith("QC 调节目标") ? "QC 目标" : "QC Final"} ${fmt(qcValue, 0)}mA`;
+    const winners = candidates.filter(c => c.value === selected.value);
+    const compactSource = source => String(source)
+      .replace(/^div[124]_(?:single|multi)(?:\/div[124]_(?:single|multi))? · mca_thermal$/, "mca_thermal")
+      .replace(/^Quick Charge 阶段推算.*$/, "Quick Charge 阶段目标");
+    const winnerLabel = winners.map(c => compactSource(c.source)).join(" + ");
+    const selectedSmall = `${winnerLabel}${winners.length > 1 ? " · 并列瓶颈" : ""}`;
     summary.push(`<span class="chip" title="有线 CP 当前上限取 Quick Charge Final/阶段目标或 QC 调节目标、当前分压 MONITOR-BAT 热控票与 SIC-BAT 动态上限中的最小值；${esc(detail)}">` +
       `当前电池充电上限<b>${fmt(selected.value, 0)}mA</b><small>${esc(selectedSmall)}</small></span>`);
     return true;
@@ -1553,6 +1577,10 @@ function renderVoters(d) {
   const noVoteNote = chargingNow && noRelevant
     ? `<div class="card"><h2>当前没有生效投票</h2>` +
       `<p class="note">无线/有线主题尚未出现有效票，等待下一次日志刷新。</p></div>` : "";
+  if (summaryCard) {
+    lastLimitSummaryHtml = summaryCard;
+    lastLimitContextKey = limitContextKey;
+  }
   $("limitSummary").innerHTML = summaryCard;
   updateLimitLive(d);
   el.innerHTML = quickCard + notChargingNote + noVoteNote + cardsShown + jeitaCard;
@@ -1761,6 +1789,8 @@ function resetRenderSignatures() {
   lastVotersJson = "";
   lastSessionsJson = "";
   lastGroupsStruct = "";
+  lastLimitSummaryHtml = "";
+  lastLimitContextKey = "";
 }
 
 let lastMeta = {};
