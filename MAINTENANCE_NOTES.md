@@ -12,7 +12,12 @@
 - 任何匹配的断开事件都会将当前 parser 状态置空，后续电流设置不会追加到已结束会话。
 - 连续 `set chg current` 合并为一条首值→末值记录，单会话事件上限降为 40；会话对象带 `source` 字段。
 
-最后更新：2026-08-13，目标发布版本：v0.11.25。
+最后更新：2026-08-13，目标发布版本：v0.11.26。
+
+## v0.11.26 有线 HVDCP/QC3 调节目标
+
+- 有线 HVDCP/QC3 分支可能没有 `mca_quick_charge_select_max_ibat` 的 Quick Charge Final，而是在 `mca_qc_get_vbus_change_trend` 日志中输出 `target_limit_fcc_ma/target_limit_ibus_ma`。
+- `target_limit_fcc_ma` 仅作为当前会话的“QC 调节目标”候选，不能改名冒充 Quick Charge Final，也不能使用 `cv_min_current` 代替；仍与当前 div MONITOR-BAT 和 SIC-BAT 上限取最小值。
 
 ## v0.11.24 启动首轮空投票保护
 

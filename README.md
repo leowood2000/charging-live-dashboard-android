@@ -2,7 +2,12 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.25（versionCode 72）**。
+当前版本：**v0.11.26（versionCode 73）**。
+
+## v0.11.26 重点改进
+
+- 补充有线 HVDCP/QC3 分支的 `target_limit_fcc_ma` 解析；该协议没有 `mca_quick_charge_select_max_ibat` 的 Quick Charge Final 时，当前电池上限显示为“QC 调节目标”，不再误报“待捕获”。
+- 保留 Quick Charge Final、阶段推算与 QC 调节目标的严格语义区分，并继续与当前分压 MONITOR-BAT、SIC-BAT 上限取最小值。
 
 ## v0.11.25 重点改进
 

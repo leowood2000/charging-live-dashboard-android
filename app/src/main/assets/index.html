@@ -996,9 +996,11 @@ function renderVoters(d) {
       `${label}<b>${fmt(value, 0)}mA</b><small>${esc(sources.join(" + "))}</small></span>`);
     return true;
   };
-  // 有线 CP 的“当前电池充电上限”必须包含 Quick Charge 阶段算法的最终目标。
+  // 有线 CP 的“当前电池充电上限”必须包含当前协议算法的目标。
   // mca_quick_charge_select_max_ibat 的 final cur_max 已经扣除了 delta_cur；
   // 若 final 行暂时没捕获，才用同一条 stage 行的 cur_max - delta_cur 回退。
+  // HVDCP/QC3 分支不产生上述 Final，而是输出 target_limit_fcc_ma；该值只标为
+  // “QC 调节目标”，不能冒充 Quick Charge Final。
   // 日志必须属于当前且新鲜的功率路径，不能把旧会话的 22A 热控票继续冒充当前上限。
   const freshWiredCpDecision = (obj, stale) => {
     if (!obj || stale) return null;
@@ -1010,6 +1012,7 @@ function renderVoters(d) {
   const addWiredCpEffectiveLimit = (pathLimit, pathSource, wcp, stale) => {
     const finalHit = freshWiredCpDecision(wcp && wcp.cur_max, stale);
     const stageHit = freshWiredCpDecision(wcp && wcp.stage_cur_max, stale);
+    const qcTargetHit = freshWiredCpDecision(wcp && wcp.qc_target, stale);
     let qcValue = null;
     let qcSource = "";
     let qcAge = null;
@@ -1030,8 +1033,15 @@ function renderVoters(d) {
         qcSource = `Quick Charge 阶段推算 · stage ${stageHit.obj.stage} (${fmt(stageHit.obj.cur_max, 0)}−${fmt(stageHit.obj.delta, 0)})`;
       }
     }
+    if (qcValue === null && qcTargetHit
+        && Number.isFinite(Number(qcTargetHit.obj.fcc))
+        && Number(qcTargetHit.obj.fcc) > 0) {
+      qcValue = Number(qcTargetHit.obj.fcc);
+      qcAge = qcTargetHit.age;
+      qcSource = "QC 调节目标 · target_limit_fcc_ma";
+    }
     if (qcValue === null) {
-      summary.push(`<span class="chip" title="有线 CP 的最终电池上限需要当前会话的新鲜 Quick Charge cur_max；未捕获时不使用旧分压热控票冒充最终值">当前电池充电上限<b>--</b><small>Quick Charge Final 待捕获</small></span>`);
+      summary.push(`<span class="chip" title="有线 CP 的电池上限需要当前会话的新鲜 Quick Charge Final、阶段目标或 QC 调节目标；未捕获时不使用旧分压热控票冒充当前值">当前电池充电上限<b>--</b><small>Quick Charge/QC 目标待捕获</small></span>`);
       return false;
     }
     const candidates = [{ value: qcValue, source: qcSource }];
@@ -1043,8 +1053,8 @@ function renderVoters(d) {
     const detail = candidates.map(c => `${c.source} ${fmt(c.value, 0)}mA`).join(" · ");
     const selectedSmall = selected.source === qcSource && qcAge !== null
       ? `${selected.source} · ${qcAge}s前`
-      : `${selected.source} · QC Final ${fmt(qcValue, 0)}mA`;
-    summary.push(`<span class="chip" title="有线 CP 当前上限取 Quick Charge 最终目标、当前分压 MONITOR-BAT 热控票与 SIC-BAT 动态上限中的最小值；${esc(detail)}">` +
+      : `${selected.source} · ${qcSource.startsWith("QC 调节目标") ? "QC 目标" : "QC Final"} ${fmt(qcValue, 0)}mA`;
+    summary.push(`<span class="chip" title="有线 CP 当前上限取 Quick Charge Final/阶段目标或 QC 调节目标、当前分压 MONITOR-BAT 热控票与 SIC-BAT 动态上限中的最小值；${esc(detail)}">` +
       `当前电池充电上限<b>${fmt(selected.value, 0)}mA</b><small>${esc(selectedSmall)}</small></span>`);
     return true;
   };

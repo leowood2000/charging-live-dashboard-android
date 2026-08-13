@@ -93,12 +93,15 @@ public final class SnapshotCollector {
     private volatile boolean lastWiredCurCp = false;
     private volatile JSONObject lastWiredCurMax = null;
     private volatile JSONObject lastWiredStageCurMax = null;
+    /** HVDCP/QC3 有线分支的实时 FCC 目标（target_limit_fcc_ma），不冒充 Quick Charge Final。 */
+    private volatile JSONObject lastWiredQcTarget = null;
     /** 最近一次 USB/real_type 会话边界；用于判断共享 Buck FCC 票是否属于本次有线会话。 */
     private volatile Long lastWiredSessionMs = null;
     /** 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）。 */
     private volatile String lastCurDecisionKey = null;
     private volatile String lastWiredCurMaxKey = null;
     private volatile String lastWiredStageCurMaxKey = null;
+    private volatile String lastWiredQcTargetKey = null;
     private volatile String lastWlsIclKey = null;
     /** 有线 Buck 证据：buckchg 策略活动（无 CP 证据时据此判 Buck）。 */
     private volatile boolean lastWiredBuck = false;
@@ -332,6 +335,8 @@ public final class SnapshotCollector {
                 if (isWiredDisconnected(ppLog)) {
                     lastVoters = clearVoteTopics(lastVoters, WIRED_VOTER_TOPICS);
                     lastChgEnabled = null;
+                    lastWiredQcTarget = null;
+                    lastWiredQcTargetKey = null;
                     lastWiredCpTel = null;
                     lastWiredBuckTel = null;
                     lastWiredTelWaiting = false;
@@ -428,8 +433,11 @@ public final class SnapshotCollector {
                             ? null : cpState.getJSONObject("d_cur_max");
                     lastWiredStageCurMax = cpState.isNull("d_stage_cur_max")
                             ? null : cpState.getJSONObject("d_stage_cur_max");
+                    lastWiredQcTarget = cpState.isNull("d_qc_target")
+                            ? null : cpState.getJSONObject("d_qc_target");
                     lastWiredCurMaxKey = null;
                     lastWiredStageCurMaxKey = null;
+                    lastWiredQcTargetKey = null;
                 } else {
                     String ds = cpState.optString("d_state", "unknown");
                     if (!"unknown".equals(ds)) {
@@ -460,6 +468,15 @@ public final class SnapshotCollector {
                         if (!key.equals(lastWiredStageCurMaxKey)) {
                             lastWiredStageCurMaxKey = key;
                             lastWiredStageCurMax = wsm;
+                        }
+                    }
+                    if (!cpState.isNull("d_qc_target")) {
+                        JSONObject wqt = cpState.getJSONObject("d_qc_target");
+                        String key = wqt.optString("log_time", "") + "|"
+                                + wqt.opt("fcc") + "|" + wqt.opt("ibus");
+                        if (!key.equals(lastWiredQcTargetKey)) {
+                            lastWiredQcTargetKey = key;
+                            lastWiredQcTarget = wqt;
                         }
                     }
                 }
@@ -579,7 +596,9 @@ public final class SnapshotCollector {
                 .put("session_at", lastWiredSessionMs == null ? 0L : lastWiredSessionMs.longValue())
                 .put("cur_max", lastWiredCurMax == null ? JSONObject.NULL : lastWiredCurMax)
                 .put("stage_cur_max", lastWiredStageCurMax == null
-                        ? JSONObject.NULL : lastWiredStageCurMax));
+                        ? JSONObject.NULL : lastWiredStageCurMax)
+                .put("qc_target", lastWiredQcTarget == null
+                        ? JSONObject.NULL : lastWiredQcTarget));
         // 统一刷新日志 meta，避免倒计时/失败标志延迟到下一轮快速采集
         JSONObject meta = core.optJSONObject("meta");
         if (meta == null) meta = new JSONObject();
@@ -829,6 +848,7 @@ public final class SnapshotCollector {
                 + "-e 'mca_quick_charge_regulation' "
                 + "-e 'mca_wireless_quick_charge_select_cur_work_mode' "
                 + "-e 'mca_wireless_quick_charge_select_max_ibat' "
+                + "-e 'target_limit_fcc_ma' "
                 + "-e 'mca_quick_charge_select_max_ibat'";
         String dir = MCA_LOG_DIR + "/";
         String script = "set -- $(ls -t " + MCA_LOG_DIR + " 2>/dev/null | head -n 2); "
@@ -1681,6 +1701,8 @@ public final class SnapshotCollector {
             "mca_quick_charge_select_max_ibat:.*cur_stage (\\d+) cur_max (\\d+) delta_cur (\\d+) cur_work_cp");
     private static final Pattern WIRED_FINAL_CUR_MAX_RE = Pattern.compile(
             "mca_quick_charge_select_max_ibat:.*cur_max (\\d+) secure_cur (\\d+) channel_cur (\\d+) thermal_cur (\\d+)");
+    private static final Pattern WIRED_QC_TARGET_RE = Pattern.compile(
+            "target_limit_fcc_ma:\\s*(\\d+)\\s*,\\s*target_limit_ibus_ma:\\s*(\\d+)");
     private static final Pattern WIRED_OPERATION_RE = Pattern.compile(
             "sc8581_set_operation_mode:.*work_mode\\s+(\\d+)");
     private static final Pattern WIRELESS_WORK_MODE_RE = Pattern.compile(
@@ -1903,6 +1925,7 @@ public final class SnapshotCollector {
         boolean dCtx = false;
         JSONObject dCurMax = null;
         JSONObject dStageCurMax = null;
+        JSONObject dQcTarget = null;
         String lastBoundaryKind = null;
         int seq = 0;
         for (String line : text.split("\n")) {
@@ -1935,6 +1958,7 @@ public final class SnapshotCollector {
                 dCtx = false;
                 dCurMax = null;
                 dStageCurMax = null;
+                dQcTarget = null;
                 continue;
             }
             if (line.contains("mca_wireless_quick_charge_")) {
@@ -2013,6 +2037,20 @@ public final class SnapshotCollector {
                 dCurCpSeq = seq;
                 continue;
             }
+            Matcher mq = WIRED_QC_TARGET_RE.matcher(line);
+            if (mq.find() && dCtx) {
+                Matcher tm = VOTE_TIME_RE.matcher(line);
+                String logTime = tm.find() ? shiftLogTime(tm.group(1)) : "";
+                dQcTarget = new JSONObject()
+                        .put("fcc", Integer.parseInt(mq.group(1)))
+                        .put("ibus", Integer.parseInt(mq.group(2)))
+                        .put("source", "mca_qc_get_vbus_change_trend")
+                        .put("log_time", logTime)
+                        .put("at", logEventAt(logTime));
+                dCurCp = true;
+                dCurCpSeq = seq;
+                continue;
+            }
             if (line.contains("mca_quick_charge_select_max_ibat:")
                     && line.contains("cur_work_cp")) {
                 dCurCp = true;
@@ -2072,6 +2110,7 @@ public final class SnapshotCollector {
                 .put("d_buck", dBuck)
                 .put("d_cur_max", dCurMax == null ? JSONObject.NULL : dCurMax)
                 .put("d_stage_cur_max", dStageCurMax == null ? JSONObject.NULL : dStageCurMax)
+                .put("d_qc_target", dQcTarget == null ? JSONObject.NULL : dQcTarget)
                 .put("d_boundary", dBoundary);
     }
 
