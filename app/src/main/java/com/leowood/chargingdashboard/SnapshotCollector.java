@@ -1965,7 +1965,8 @@ public final class SnapshotCollector {
                 wCtx = true;
                 dCtx = false;
             }
-            if (line.contains("mca_quick_charge_") || line.contains("strategy_quickchg_")) {
+            if (line.contains("mca_quick_charge_") || line.contains("[mca_quick_charge]")
+                    || line.contains("strategy_quickchg_")) {
                 dCtx = true;
                 wCtx = false;
             }
