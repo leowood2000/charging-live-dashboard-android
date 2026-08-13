@@ -990,6 +990,58 @@ function renderVoters(d) {
       `${label}<b>${fmt(value, 0)}mA</b><small>${esc(sources.join(" + "))}</small></span>`);
     return true;
   };
+  // 有线 CP 的“当前电池充电上限”必须包含 Quick Charge 阶段算法的最终目标。
+  // mca_quick_charge_select_max_ibat 的 final cur_max 已经扣除了 delta_cur；
+  // 若 final 行暂时没捕获，才用同一条 stage 行的 cur_max - delta_cur 回退。
+  // 日志必须属于当前且新鲜的功率路径，不能把旧会话的 22A 热控票继续冒充当前上限。
+  const freshWiredCpDecision = (obj, stale) => {
+    if (!obj || stale) return null;
+    const at = Number(obj.at);
+    const age = Number.isFinite(at) && at > 0 ? (Date.now() - at) / 1000 : Infinity;
+    if (!Number.isFinite(age) || age < -5 || age > 30) return null;
+    return { obj, age: Math.max(0, Math.round(age)) };
+  };
+  const addWiredCpEffectiveLimit = (pathLimit, pathSource, wcp, stale) => {
+    const finalHit = freshWiredCpDecision(wcp && wcp.cur_max, stale);
+    const stageHit = freshWiredCpDecision(wcp && wcp.stage_cur_max, stale);
+    let qcValue = null;
+    let qcSource = "";
+    let qcAge = null;
+    if (finalHit && Number.isFinite(Number(finalHit.obj.cur_max)) && Number(finalHit.obj.cur_max) > 0) {
+      qcValue = Number(finalHit.obj.cur_max);
+      qcAge = finalHit.age;
+      qcSource = "Quick Charge Final";
+      if (stageHit && Number.isFinite(Number(stageHit.obj.cur_max)) && Number.isFinite(Number(stageHit.obj.delta))) {
+        qcSource += ` · stage ${stageHit.obj.stage} (${fmt(stageHit.obj.cur_max, 0)}−${fmt(stageHit.obj.delta, 0)})`;
+      }
+    } else if (stageHit
+        && Number.isFinite(Number(stageHit.obj.cur_max))
+        && Number.isFinite(Number(stageHit.obj.delta))) {
+      const derived = Number(stageHit.obj.cur_max) - Number(stageHit.obj.delta);
+      if (derived > 0) {
+        qcValue = derived;
+        qcAge = stageHit.age;
+        qcSource = `Quick Charge 阶段推算 · stage ${stageHit.obj.stage} (${fmt(stageHit.obj.cur_max, 0)}−${fmt(stageHit.obj.delta, 0)})`;
+      }
+    }
+    if (qcValue === null) {
+      summary.push(`<span class="chip" title="有线 CP 的最终电池上限需要当前会话的新鲜 Quick Charge cur_max；未捕获时不使用旧分压热控票冒充最终值">当前电池充电上限<b>--</b><small>Quick Charge Final 待捕获</small></span>`);
+      return false;
+    }
+    const candidates = [{ value: qcValue, source: qcSource }];
+    if (pathLimit && Number.isFinite(Number(pathLimit.value)) && Number(pathLimit.value) > 0) {
+      candidates.push({ value: Number(pathLimit.value), source: pathSource });
+    }
+    if (wiredSicLimit !== null) candidates.push({ value: wiredSicLimit, source: "SIC-BAT" });
+    const selected = candidates.reduce((a, b) => b.value < a.value ? b : a);
+    const detail = candidates.map(c => `${c.source} ${fmt(c.value, 0)}mA`).join(" · ");
+    const selectedSmall = selected.source === qcSource && qcAge !== null
+      ? `${selected.source} · ${qcAge}s前`
+      : `${selected.source} · QC Final ${fmt(qcValue, 0)}mA`;
+    summary.push(`<span class="chip" title="有线 CP 当前上限取 Quick Charge 最终目标、当前分压 MONITOR-BAT 热控票与 SIC-BAT 动态上限中的最小值；${esc(detail)}">` +
+      `当前电池充电上限<b>${fmt(selected.value, 0)}mA</b><small>${esc(selectedSmall)}</small></span>`);
+    return true;
+  };
   const battMa = d.derived && d.derived.batt_current_ma;
   // 充电生效三态只在输入仍连接时成立；完全断开后不能让缓存的 OFF 票
   // 随放电电流跨越阈值而反复冒充“刚停充”。
@@ -1071,8 +1123,8 @@ function renderVoters(d) {
         const stopLabel = ceStopping ? "停止中" : "已停止";
         summary.push(`<span class="chip" title="输入仍连接，但 chg_enable 已 OFF；停止阶段不再展示可能滞后的 CP/Buck 上限">当前电池充电电流上限<b>--</b><small>${stopLabel}</small></span>`);
       } else if (wcp.state === "cp") {
-        // 有线 CP：当前限制只显示当前分压路径的 mca_thermal 上限；
-        // Quick Charge cur_max 是算法目标，保留在详情数据中，不冒充路径上限。
+        // 有线 CP：Quick Charge Final（cur_max，已包含 delta_cur 修正）与
+        // 当前分压热控/SIC-BAT 取最小值；没有当前会话算法证据时宁可待捕获。
         const ratio = wcp.ratio;
         const divSingle = ratio === 4 ? "div4_single"
           : ratio === 2 ? "div2_single"
@@ -1101,13 +1153,7 @@ function renderVoters(d) {
         } else {
           cpLimitNote = "当前无生效热控票";
         }
-        if (cpLimit) {
-          addWiredThermalLimit("当前电池充电上限", cpLimit, cpLimitSource);
-        } else if (addWiredThermalLimit("当前电池充电上限", null, "")) {
-          // 当前分压表尚未捕获时，SIC-BAT 仍是驱动已发布的独立热控上限。
-        } else {
-          summary.push(`<span class="chip" title="无法唯一确定当前 CP 分压路径的 MONITOR-BAT 热控上限，且 SIC-BAT 尚未发布">当前电池充电上限<b>--</b><small>${esc(cpLimitNote)}</small></span>`);
-        }
+        addWiredCpEffectiveLimit(cpLimit, cpLimitSource, wcp, ppStaleD);
       } else {
         // 只有明确且新鲜的 Buck 路径才采用 Buck 输入 ICL/FCC；普通 USB 慢充仍属于此分支。
         const buckPathActive = wcp.state === "buck" && wiredCharging && wiredPathFresh;

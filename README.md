@@ -2,7 +2,12 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.22（versionCode 69）**。
+当前版本：**v0.11.25（versionCode 72）**。
+
+## v0.11.25 重点改进
+
+- 有线 CP 的“当前电池充电上限”现在优先采用同一会话 Quick Charge `mca_quick_charge_select_max_ibat` 的最终 `cur_max`；该值已包含 `delta_cur` 修正。
+- 若最终行暂时未捕获，才使用同一阶段的 `cur_max - delta_cur` 推算；再与当前分压 MONITOR-BAT 和 SIC-BAT 上限取最小值。决策日志陈旧或缺失时显示“Quick Charge Final 待捕获”，不再把旧的 22A 热控票当成当前最终上限。
 
 ## v0.11.22 重点改进
 
@@ -84,7 +89,7 @@ Web / ADB 版见 [charging-live-dashboard](https://github.com/leowood2000/chargi
 - 会话档案把连续的 `open path ibus` 电流爬升合并成一条“CP 建链”，保留首末电流和次数，不再误导为反复开关快充路径。
 - 输入仍连接但已自动停充时，路径从“停止中”稳定收敛到“已停止”，当前上限不再回显旧 CP/Buck 目标；`USB ONLINE=0` 明确否决有线，只有 ONLINE 未知时才允许 VBUS 回退，拔线后不会被缓存日志重新判成有线。
 - 日志年龄采用事件真实时间，并正确处理单个日志文件跨午夜；重启采集器不会把旧决策误标成“刚刚”。
-- 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP/Buck 将当前 MONITOR-BAT 路径票（`div1/div2/div4` 或 `buck_charge_curr`）与 SIC-BAT `wired_chg_curr` 的动态上限取较小值，作为“有线热控上限”。协议、曲线和安全等其他驱动算法层不被伪装成此字段。路径或 single/multi 拓扑不能唯一确定时显示“待确认”。
+- 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP 优先使用同一会话 Quick Charge `mca_quick_charge_select_max_ibat` 的最终 `cur_max`（必要时用阶段 `cur_max-delta_cur` 回退），再与当前 MONITOR-BAT 路径票和 SIC-BAT `wired_chg_curr` 的动态上限取较小值；有线 Buck 仍取当前 `buck_charge_curr` 与 SIC-BAT 的较小值。算法日志陈旧或缺失时显示“Quick Charge Final 待捕获”，不把旧热控票冒充最终值。
 - 从有线切换到无线时，实时输入源优先于残留 USB ONLINE/有线 CP 日志，避免无线慢充沿用上一段有线 CP 路径。
 - 无线 CP 总览显示 `RX 输出允许上限` 与 `实际 RX 输出` 两行；两行分别使用与电池上限/实际电流相同的主次高亮颜色。
 - 无线停充但仍在旁路供电时，显示 `无线 Buck ICL（旁路）`；电池充电上限显示为 `-- / 已停止`。
