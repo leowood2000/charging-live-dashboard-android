@@ -53,6 +53,11 @@ public final class SnapshotCollector {
     private static final double CP_IBUS_ACTIVE_MIN_MA = 100.0;
     private static final int SESSION_MAX = 1;
     private static final int SESSION_EVENT_MAX = 40;
+    // 投票日志是事件式输出。前台运行时只补读新增内容；长时间未运行或
+    // 日志轮转后放弃追赶全部历史，最多回退到最新 2MiB。
+    private static final long VOTE_INCREMENT_MAX_BYTES = 256L * 1024L;
+    private static final long VOTE_OVERLAP_BYTES = 64L * 1024L;
+    private static final long VOTE_FALLBACK_BYTES = 2L * 1024L * 1024L;
 
     private final Deque<JSONObject> history = new ArrayDeque<>();
     /** 无锁读取的快照字符串；首次即返回 loading 状态，避免启动黑屏等待采集锁。 */
@@ -74,6 +79,10 @@ public final class SnapshotCollector {
     private volatile Long lastWlsWorkModeMs = null;
     /** 当前读取的 mca 日志文件名（mca_log_MMDD_HHMM.log），用于日志时间归一化。 */
     private volatile String lastLogFname = "";
+    /** mca_vote 增量读取游标；进程重启/长间隔超限时自动回退到最新 2MiB。 */
+    private volatile String lastVoteFile = "";
+    private volatile long lastVoteOffset = 0L;
+    private volatile boolean voteCursorReady = false;
     private volatile Integer lastWlsChgEn = null;
     /** quick wireless 最终电池电流目标 cur_max:[Final]，CP 快充路径下真正约束电流的值。 */
     private volatile Integer lastQuickCurMax = null;
@@ -854,12 +863,44 @@ public final class SnapshotCollector {
                 + "-e 'target_limit_fcc_ma' "
                 + "-e 'mca_quick_charge_select_max_ibat'";
         String dir = MCA_LOG_DIR + "/";
+        // mca_vote 只在投票变化时打印。前台连续运行时按文件偏移增量读取，
+        // 每次最多补读 256KiB（含 64KiB 重叠）；进程重启、日志轮转或
+        // 间隔过大时直接回退到最新 2MiB，不追赶无限历史。
+        boolean allowOlderVoteFallback = lastVoters.length() == 0;
+        String prevVoteFile = lastVoteFile == null ? "" : lastVoteFile;
+        if (!prevVoteFile.matches("[A-Za-z0-9_.\\-]*")) prevVoteFile = "";
+        long prevVoteOffset = Math.max(0L, lastVoteOffset);
+        String votePath = dir + "${newest}";
+        String voteRead =
+                "vote_size=$(stat -c %s " + votePath + " 2>/dev/null || "
+                + "wc -c < " + votePath + "); "
+                + "vote_mode=tail; "
+                + "if [ \"$newest\" = '" + prevVoteFile + "' ] && [ \"$vote_size\" -ge "
+                + prevVoteOffset + " ] && [ $((vote_size - " + prevVoteOffset + ")) -le "
+                + VOTE_INCREMENT_MAX_BYTES + " ]; then vote_mode=incremental; fi; "
+                + "echo '__VOTE_CURSOR__${newest}|${vote_size}|${vote_mode}'; ";
+        if (allowOlderVoteFallback) {
+            voteRead += "[ -n \"${older}\" ] && tail -c " + VOTE_FALLBACK_BYTES + " " + dir
+                    + "${older} 2>/dev/null | grep -a -F 'mca_vote'; ";
+        }
+        voteRead +=
+                "if [ \"$vote_mode\" = incremental ]; then "
+                + "vote_start=$((" + prevVoteOffset + " - " + VOTE_OVERLAP_BYTES + ")); "
+                + "[ $vote_start -lt 0 ] && vote_start=0; "
+                + "vote_aligned=$((vote_start / 4096 * 4096)); "
+                + "vote_skip=$((vote_aligned / 4096)); "
+                + "vote_prefix=$((vote_start - vote_aligned)); "
+                + "vote_count=$((vote_size - vote_start)); "
+                + "dd if=" + votePath + " bs=4096 skip=$vote_skip 2>/dev/null "
+                + "| tail -c +$((vote_prefix + 1)) | head -c $vote_count "
+                + "| grep -a -F 'mca_vote'; "
+                + "else tail -c " + VOTE_FALLBACK_BYTES + " " + votePath
+                + " 2>/dev/null | grep -a -F 'mca_vote'; fi; ";
         String script = "set -- $(ls -t " + MCA_LOG_DIR + " 2>/dev/null | head -n 2); "
                 + "newest=$1; older=$2; "
                 + "echo __LOG_FILE__${newest}; "
                 + "echo __VOTE_BEGIN__; "
-                + "tail -c 2097152 " + dir + "${newest} 2>/dev/null "
-                + "| grep -a -F 'mca_vote'; echo __VOTE_END__; "
+                + voteRead + "echo __VOTE_END__; "
                 + "echo __SESSION_BEGIN__; "
                 + "{ [ -n \"${older}\" ] && tail -c 4194304 " + dir + "${older} 2>/dev/null "
                 + "| grep -a -F " + grepArgs + " | grep -v -F 'sysfs_show'; "
@@ -875,6 +916,13 @@ public final class SnapshotCollector {
         Matcher fm = Pattern.compile("__LOG_FILE__([A-Za-z0-9_.\\-]+)").matcher(raw);
         boolean fileOk = fm.find();
         if (fileOk) lastLogFname = fm.group(1);
+        Matcher vm = Pattern.compile("__VOTE_CURSOR__([A-Za-z0-9_.\\-]+)\\|(\\d+)\\|(incremental|tail)")
+                .matcher(raw);
+        if (vm.find()) {
+            lastVoteFile = vm.group(1);
+            lastVoteOffset = Long.parseLong(vm.group(2));
+            voteCursorReady = true;
+        }
         out.voteOk = fileOk && raw.contains("__VOTE_BEGIN__") && raw.contains("__VOTE_END__");
         out.sessionOk = fileOk && raw.contains("__SESSION_BEGIN__") && raw.contains("__SESSION_END__");
         out.powerPathOk = fileOk && raw.contains("__PP_BEGIN__") && raw.contains("__PP_END__");
