@@ -12,7 +12,12 @@
 - 任何匹配的断开事件都会将当前 parser 状态置空，后续电流设置不会追加到已结束会话。
 - 连续 `set chg current` 合并为一条首值→末值记录，单会话事件上限降为 40；会话对象带 `source` 字段。
 
-最后更新：2026-08-13，目标发布版本：v0.11.24。
+最后更新：2026-08-13，目标发布版本：v0.11.26。
+
+## v0.11.26 有线 HVDCP/QC3 调节目标
+
+- 有线 HVDCP/QC3 分支可能没有 `mca_quick_charge_select_max_ibat` 的 Quick Charge Final，而是在 `mca_qc_get_vbus_change_trend` 日志中输出 `target_limit_fcc_ma/target_limit_ibus_ma`。
+- `target_limit_fcc_ma` 仅作为当前会话的“QC 调节目标”候选，不能改名冒充 Quick Charge Final，也不能使用 `cv_min_current` 代替；仍与当前 div MONITOR-BAT 和 SIC-BAT 上限取最小值。
 
 ## v0.11.24 启动首轮空投票保护
 
@@ -21,7 +26,7 @@
 
 ## v0.11.19 有线热控合并与共享 FCC 归属
 
-- 有线 CP/Buck 首页上限为 MONITOR-BAT 路径票与 SIC-BAT `wired_chg_curr` 的较小值；这只是有线热控上限，Quick Charge `cur_max` 仍仅作诊断。
+- 有线 CP 当前电池上限优先取同一会话 Quick Charge `mca_quick_charge_select_max_ibat` 的最终 `cur_max`（已包含 `delta_cur`；最终行缺失时用阶段 `cur_max-delta_cur` 回退），再与当前 MONITOR-BAT 路径票和 SIC-BAT `wired_chg_curr` 取最小值；有线 Buck 仍取 Buck FCC 与 SIC-BAT 的较小值。算法日志陈旧/缺失时显示待捕获，不能用旧热控票冒充最终值。
 - `buck_charge_curr` 是有线 Buck/无线 Buck 共用的 Buck ICHG topic：不随单侧断开整体清理，并以 VOTER 表时间不早于当前输入会话边界作为首页使用条件；CP 不采用。
 - 温度摘要按当前路径取证，禁止从所有缓存 thermal/JEITA 票中任意挑选。
 
@@ -101,7 +106,7 @@
 - `work_mode=1/2/4` 分别对应 1:1、2:1、4:1 CP；明确 `operation mode=0` 表示 Buck。
 - 路径详情必须四路硬隔离：有线 CP 只留当前 div/CP 数据；有线 Buck 只留 buck_input、buck_charge_curr 和当前 5V/9V 档；无线 CP 留 Quick Wireless、wireless_sw_qc_ich、wireless_sw_thermal_ich、wls_single/multi_chg_cur、rx_iout_limit 与 RX 实测；无线 Buck 只留 wireless_buck_input、buck_charge_curr 与 RX 实测。无线页禁止出现任何有线 div/档位票，Buck 页禁止出现无线 CP 软件票。
 - 无线 CP 路径的当前电池充电电流上限取手机原生 Quick Wireless `cur_max:[Final]`。
-- 有线 CP 路径按当前分压比选择 `div1/div2/div4` 的 MONITOR-BAT `mca_thermal` 上限；Buck 路径取 `buck_charge_curr effective`。两者再与 SIC-BAT `wired_chg_curr`（µA→mA，正值才有效）的动态 PID 上限取较小值，显示为“当前电池充电上限”。它是有线**热控**上限，不等同完整 Quick Charge 最终算法目标；`cur_max` 继续只在详情诊断。single/multi 异值且拓扑未知时保持“待确认”。
+- 有线 CP 路径按当前分压比选择 `div1/div2/div4` 的 MONITOR-BAT `mca_thermal` 上限，并与同会话 Quick Charge `cur_max`（或阶段 `cur_max-delta_cur`）及 SIC-BAT `wired_chg_curr`（µA→mA，正值才有效）取最小值，显示为“当前电池充电上限”。single/multi 异值且拓扑未知时不采用该路径票，但仍不能用陈旧算法值冒充当前上限。
 - 温度摘要必须按当前输入源/路径取证：有线 CP 仅看选中的 div 票与 SIC-BAT，有线 Buck 仅看本会话 Buck FCC/SIC-BAT，无线 CP 只看 Quick Wireless `sw_thermal_ichg`，无线 Buck 只看 `wireless_thermal_*`。禁止从所有缓存 topic 中挑第一张 thermal/jeita 票。
 - 路径不确定时显示“待确认”，不能用 Buck FCC 兜底冒充当前上限。
 - 无线/有线 SC8581 会话状态必须隔离；无线 `power_good` 不应重置有线 track，反之亦然。
