@@ -833,6 +833,9 @@ public final class SnapshotCollector {
                 + "-e 'AUTHEN_FINISH' -e 'uuid_value' "
                 + "-e 'TX_ADAPTER' -e 'FAST_CHARGE' -e 'fast chg success' "
                 + "-e 'set chg current' -e 'open path ibus' "
+                + "-e 'sc8581_set_operation_mode' -e 'mca_quick_charge_update_work_mode_para' "
+                + "-e 'strategy_quickchg_map_ibus_to_fsw' -e 'cur_work_cp' "
+                + "-e 'strategy_quickchg_enable_buck_charging' "
                 + "-e 'smartchg_soc_limit_callback' "
                 + "-e 'strategy_wireless_get_qc_enable' "
                 + "-e 'strategy_wireless_get_charging_info' "
@@ -1447,6 +1450,11 @@ public final class SnapshotCollector {
     private static final Pattern ICHG_RE = Pattern.compile("set chg current (\\d+)");
     private static final Pattern OPEN_RE = Pattern.compile("open path ibus (\\d+)");
     private static final Pattern REAL_TYPE_OFF_RE = Pattern.compile("real_type changed: \\d+ => 0");
+    private static final Pattern REAL_TYPE_CHANGE_RE = Pattern.compile("real_type changed: (\\d+) => (\\d+)");
+    private static final Pattern SESSION_CP_MODE_RE = Pattern.compile("sc8581_set_operation_mode:\\d+ .*set operation mode (\\d+) reg (\\d+) work_mode (\\d+)");
+    private static final Pattern CP_RATIO_RE = Pattern.compile("strategy_quickchg_map_ibus_to_fsw:\\d+ .*ibus_avg: (\\d+), ratio: (\\d+), cp_iout: (\\d+)");
+    private static final Pattern CP_ACTIVE_RE = Pattern.compile("mca_quick_charge_select_max_ibat:\\d+ .*cur_stage (\\d+) cur_max (\\d+) delta_cur (\\d+) cur_work_cp");
+    private static final Pattern BUCK_PARALLEL_RE = Pattern.compile("strategy_quickchg_enable_buck_charging:\\d+ (enable|disable) buck parallel charging!.*?ibus\\s*: ?(\\d+)");
 
     private JSONArray parseSessions(String text) throws JSONException {
         JSONArray sessions = new JSONArray();
@@ -1457,6 +1465,11 @@ public final class SnapshotCollector {
         int openCount = 0;
         int ichgFirstMa = 0;
         int ichgCount = 0;
+        StringBuilder ichgSequence = new StringBuilder();
+        String lastCpModeEvent = null;
+        Integer lastCpRatioEvent = null;
+        Integer lastCpStageEvent = null;
+        Boolean lastBuckParallelEvent = null;
         for (String line : text.split("\n")) {
             String kind = null, detail = "";
             if (line.contains("wireless power_good_off")) kind = "off";
@@ -1487,6 +1500,44 @@ public final class SnapshotCollector {
                     }
                 }
             }
+            // 功率路径信号不是会话边界，但要进入会话时间线；原先只留在 PP 派生状态。
+            if (kind == null) {
+                Matcher rt = REAL_TYPE_CHANGE_RE.matcher(line);
+                if (rt.find() && !"0".equals(rt.group(2))) {
+                    kind = "wired_type";
+                    detail = rt.group(1) + "→" + rt.group(2);
+                }
+            }
+            if (kind == null) {
+                Matcher pm = SESSION_CP_MODE_RE.matcher(line);
+                if (pm.find()) {
+                    kind = "cp_mode";
+                    detail = "operation_mode " + pm.group(1) + " · work_mode " + pm.group(3);
+                }
+            }
+            if (kind == null) {
+                Matcher pr = CP_RATIO_RE.matcher(line);
+                if (pr.find()) {
+                    kind = "cp_ratio";
+                    detail = "ratio " + pr.group(2) + ":1 · ibus_avg " + pr.group(1)
+                            + "mA · cp_iout " + pr.group(3) + "mA";
+                }
+            }
+            if (kind == null) {
+                Matcher ca = CP_ACTIVE_RE.matcher(line);
+                if (ca.find()) {
+                    kind = "cp_active";
+                    detail = "stage " + ca.group(1) + " · cur_max " + ca.group(2)
+                            + "mA · delta " + ca.group(3) + "mA";
+                }
+            }
+            if (kind == null) {
+                Matcher bp = BUCK_PARALLEL_RE.matcher(line);
+                if (bp.find()) {
+                    kind = "enable".equals(bp.group(1)) ? "buck_parallel_on" : "buck_parallel_off";
+                    detail = "ibus " + bp.group(2) + "mA";
+                }
+            }
             if (kind == null) continue;
             if (kind.equals("on") || kind.equals("wired_on")) {
                 String source = kind.equals("wired_on") ? "wired" : "wireless";
@@ -1497,6 +1548,11 @@ public final class SnapshotCollector {
                 openCount = 0;
                 ichgGroup = null;
                 ichgCount = 0;
+                ichgSequence.setLength(0);
+                lastCpModeEvent = null;
+                lastCpRatioEvent = null;
+                lastCpStageEvent = null;
+                lastBuckParallelEvent = null;
                 cur = new JSONObject().put("start", shiftLogTime(timeOf(line))).put("ended", false)
                         .put("source", source)
                         .put("events", new JSONArray())
@@ -1513,14 +1569,37 @@ public final class SnapshotCollector {
                 openGroup = null;
                 openCount = 0;
             }
-            if (!kind.equals("ichg")) {
-                ichgGroup = null;
-                ichgCount = 0;
-            }
             if (kind.equals("on")) {
                 ev.put(event(line, "on", "无线充电板接入", ""));
             } else if (kind.equals("wired_on")) {
                 ev.put(event(line, "wired_on", "有线充电接入", ""));
+            } else if (kind.equals("wired_type")) {
+                ev.put(event(line, "wired_type", "有线协议变化", detail));
+            } else if (kind.equals("cp_mode")) {
+                if (!detail.equals(lastCpModeEvent)) {
+                    ev.put(event(line, "cp_mode", "CP 模式信号", detail));
+                    lastCpModeEvent = detail;
+                }
+            } else if (kind.equals("cp_ratio")) {
+                Matcher rm = Pattern.compile("ratio (\\d+):1").matcher(detail);
+                int ratio = rm.find() ? Integer.parseInt(rm.group(1)) : -1;
+                if (lastCpRatioEvent == null || ratio != lastCpRatioEvent) {
+                    ev.put(event(line, "cp_ratio", "CP 分压比", detail));
+                    lastCpRatioEvent = ratio;
+                }
+            } else if (kind.equals("cp_active")) {
+                Matcher sm = Pattern.compile("stage (\\d+)").matcher(detail);
+                int stage = sm.find() ? Integer.parseInt(sm.group(1)) : -1;
+                if (lastCpStageEvent == null || stage != lastCpStageEvent) {
+                    ev.put(event(line, "cp_active", "CP 充电路径运行", detail));
+                    lastCpStageEvent = stage;
+                }
+            } else if (kind.equals("buck_parallel_on") || kind.equals("buck_parallel_off")) {
+                boolean enabled = kind.equals("buck_parallel_on");
+                if (lastBuckParallelEvent == null || lastBuckParallelEvent != enabled) {
+                    ev.put(event(line, kind, enabled ? "Buck 并行充电启用" : "Buck 并行充电关闭", detail));
+                    lastBuckParallelEvent = enabled;
+                }
             } else if (kind.equals("off") || kind.equals("wired_off")) {
                 String source = cur.optString("source");
                 boolean matches = (kind.equals("off") && "wireless".equals(source))
@@ -1547,11 +1626,14 @@ public final class SnapshotCollector {
                 if (ichgGroup == null) {
                     ichgFirstMa = v;
                     ichgCount = 1;
+                    ichgSequence.setLength(0);
+                    ichgSequence.append(v);
                     ichgGroup = event(line, "ichg", "设置充电电流", v + "mA");
                     ev.put(ichgGroup);
                 } else {
                     ichgCount++;
-                    ichgGroup.put("detail", ichgFirstMa + "→" + v + "mA · " + ichgCount + "次");
+                    ichgSequence.append("→").append(v);
+                    ichgGroup.put("detail", ichgSequence + "mA · " + ichgCount + "次");
                 }
                 if (cur.isNull("peak_limit_ma") || v > cur.optInt("peak_limit_ma"))
                     cur.put("peak_limit_ma", v);
@@ -1578,9 +1660,19 @@ public final class SnapshotCollector {
         while (sessions.length() > SESSION_MAX) sessions.remove(0);
         for (int i = 0; i < sessions.length(); i++) {
             JSONArray evs = sessions.getJSONObject(i).getJSONArray("events");
+            sortSessionEvents(evs);
             while (evs.length() > SESSION_EVENT_MAX) evs.remove(0);
         }
         return sessions;
+    }
+
+    /** 聚合电流序列时事件对象会更新到最后一次写入；重新按日志时间排列，避免路径行倒序。 */
+    private void sortSessionEvents(JSONArray events) throws JSONException {
+        List<JSONObject> ordered = new ArrayList<>();
+        for (int i = 0; i < events.length(); i++) ordered.add(events.getJSONObject(i));
+        ordered.sort((a, b) -> a.optString("time", "").compareTo(b.optString("time", "")));
+        while (events.length() > 0) events.remove(0);
+        for (JSONObject event : ordered) events.put(event);
     }
 
     private JSONObject event(String line, String kind, String label, String detail)
