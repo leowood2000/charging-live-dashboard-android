@@ -9,6 +9,18 @@
 - 有线 CP 的“当前电池充电上限”现在优先采用同一会话 Quick Charge `mca_quick_charge_select_max_ibat` 的最终 `cur_max`；该值已包含 `delta_cur` 修正。
 - 若最终行暂时未捕获，才使用同一阶段的 `cur_max - delta_cur` 推算；再与当前分压 MONITOR-BAT 和 SIC-BAT 上限取最小值。决策日志陈旧或缺失时显示“Quick Charge Final 待捕获”，不再把旧的 22A 热控票当成当前最终上限。
 
+## v0.11.24 重点改进
+
+- 修复启动首轮日志尚未捕获 `wireless_buck_input` 时，前端读取空投票对象导致“快照解析失败”的瞬态报错。
+- 空投票主题现在安全显示为待捕获，后续日志到达后正常恢复，不再污染实时数据页面。
+
+## v0.11.23 重点改进
+
+- `chg_enable` 只接受当前有线会话内、且仍有启用票的驱动 effective；旧 OFF 票不再影响停充后的输入测量源。
+- 无线 Buck 输入 ICL 总览与详情统一只认有效 effective；无 effective 时显示待捕获，不用 MIN 推算或 CP 的 `wireless_qc` 残留冒充当前 ICL。
+- `session_at=0` 时不再采用缓存的 `buck_charge_curr`，避免无法证明会话归属时显示旧 FCC。
+- 有线 CP 温控证据同时核对当前比例的 single/multi 表，异值时明确提示拓扑待确认。
+
 ## v0.11.22 重点改进
 
 - 修正同名 `xm_wls` 的解释：其语义由所在 votable 决定，`wireless_sw_qc_ich` 中的票属于无线 CP 软件电池电流限制。
