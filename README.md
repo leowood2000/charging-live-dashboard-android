@@ -2,7 +2,12 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.26（versionCode 73）**。
+当前版本：**v0.11.27（versionCode 74）**。
+
+## v0.11.27 重点改进
+
+- 有线 CP 当前限制主卡只显示最终瓶颈（例如 `mca_thermal + SIC-BAT（并列）`），Quick Charge Final、div single/multi 与 SIC-BAT 候选仍保留在详情提示，不再把非瓶颈值挤在主卡右侧。
+- 修复日志投票通道短暂空快照造成“当前限制”整卡闪空的 UI 时序问题：同一输入会话且日志读取失败时保留上一张稳定卡，新会话/路径变化仍显示待捕获。
 
 ## v0.11.26 重点改进
 
