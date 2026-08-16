@@ -2067,8 +2067,8 @@ public final class SnapshotCollector {
     }
 
     /** 无线/有线 CP 状态彻底解耦：power_good 只重置无线；usb online/real_type changed 只重置有线；
-     *  有线 sc8581_set_operation_mode 行没有 quickchg 上下文前缀，按最近有线边界直接作为有线证据；
-     *  无线仍要求 quickchg 上下文，避免旧会话操作模式污染慢充。 */
+     *  sc8581_set_operation_mode 行没有 quickchg 上下文前缀时，按最近物理边界归属，
+     *  并从同一行的 work_mode=1/2/4 保留无线 CP 分压比，避免首页只显示“CP”。 */
     private JSONObject parseSessionCpState(String text) throws JSONException {
         Integer wMode = null;
         Integer wWork = null;
@@ -2145,13 +2145,27 @@ public final class SnapshotCollector {
                     dMode = n;
                     dModeSeq = seq;
                 } else if (line.contains("sc8581_set_operation_mode")
-                        && "wired".equals(lastBoundaryKind)) {
-                    // 有线 cp_sc8581 行没有 mca_quick_charge_/strategy_quickchg_ 前缀，
-                    // 仅依赖 dCtx 会把明确的 mode=1 丢掉，随后被 buckchg 行误判为 Buck。
-                    dMode = n;
-                    dModeSeq = seq;
+                        && ("wired".equals(lastBoundaryKind)
+                        || "wireless".equals(lastBoundaryKind))) {
+                    // cp_sc8581 行没有 mca_wireless_quick_charge/mca_quick_charge
+                    // 前缀；最近的 power_good/USB 边界决定归属，work_mode 同行给出比例。
                     Matcher opRatio = WIRED_OPERATION_RE.matcher(line);
-                    if (opRatio.find()) dRatio = Integer.parseInt(opRatio.group(1));
+                    if ("wireless".equals(lastBoundaryKind)) {
+                        wMode = n;
+                        if (opRatio.find()) {
+                            wWork = Integer.parseInt(opRatio.group(1));
+                            Matcher tm = VOTE_TIME_RE.matcher(line);
+                            String raw = tm.find() ? tm.group(1) : "";
+                            wWorkMs = raw.isEmpty() ? null
+                                    : Long.valueOf(absLogMs(lastLogFname, shiftLogTime(raw)));
+                        }
+                    } else {
+                        // 有线 cp_sc8581 行没有 quickchg 上下文前缀；
+                        // 仅依赖 dCtx 会把明确的 mode=1 丢掉，随后被 buckchg 行误判为 Buck。
+                        dMode = n;
+                        dModeSeq = seq;
+                        if (opRatio.find()) dRatio = Integer.parseInt(opRatio.group(1));
+                    }
                 }
                 continue;
             }

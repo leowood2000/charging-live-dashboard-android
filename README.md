@@ -2,7 +2,12 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.30（versionCode 77）**。
+当前版本：**v0.11.31（versionCode 78）**。
+
+## v0.11.31 CP 比例解析修复
+
+- 识别没有 `mca_*quick_charge` 前缀的 `sc8581_set_operation_mode` 日志，并按最近的 USB / 无线物理边界归属。
+- 从同一行的 `work_mode` 保留有线或无线 CP 的 1:1、2:1、4:1 比例，避免当前限制页面只显示“CP”。
 
 ## v0.11.30 mi_thermald 场景直读
 

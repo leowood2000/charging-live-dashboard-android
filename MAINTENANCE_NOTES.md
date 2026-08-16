@@ -1,5 +1,10 @@
 # 维护与跨会话交接说明
 
+## v0.11.31 CP 比例解析修复
+
+- `sc8581_set_operation_mode` 没有 quick-charge 前缀时，按最近的 USB / 无线边界确定输入源。
+- 同行 `work_mode` 现在用于发布 CP 分压比；有线和无线状态分别缓存，避免页面退化为仅显示“CP”。
+
 ## v0.11.30 mi_thermald 场景直读
 
 - Android/Web 在同一批快速采集中读取 `/sys/class/thermal/thermal_message/sconfig` 与 `screen_state`；场景优先使用 `thermal-map.conf` 索引，熄屏且 Charging 时标为未入 map 的 `chg-only（熄屏充电）`。
