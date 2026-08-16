@@ -5,6 +5,11 @@
 - Android/Web 在同一批快速采集中读取 `/sys/class/thermal/thermal_message/sconfig` 与 `screen_state`；场景优先使用 `thermal-map.conf` 索引，熄屏且 Charging 时标为未入 map 的 `chg-only（熄屏充电）`。
 - `thermal.dump` 继续提供虚拟温度/无线热控目标；`thermal.scene_source` 标记 `sconfig`、`screen_state+sconfig` 或 `thermal.dump`。Android 后台/锁屏不采集，Web 可在手机熄屏时继续记录场景。
 
+## v0.11.30 mi_thermald 场景直读
+
+- Android/Web 在同一批快速采集中读取 `/sys/class/thermal/thermal_message/sconfig` 与 `screen_state`；场景优先使用 `thermal-map.conf` 索引，熄屏且 Charging 时标为未入 map 的 `chg-only（熄屏充电）`。
+- `thermal.dump` 继续提供虚拟温度/无线热控目标；`thermal.scene_source` 标记 `sconfig`、`screen_state+sconfig` 或 `thermal.dump`。Android 后台/锁屏不采集，Web 可在手机熄屏时继续记录场景。
+
 ## v0.11.21 四路功率路径隔离
 
 - 有线/无线 × CP/Buck 四路分别过滤当前限制与详情票，CP 不再显示任何 Buck ICL/FCC。
