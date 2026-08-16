@@ -1,5 +1,15 @@
 # 维护与跨会话交接说明
 
+## v0.11.30 mi_thermald 场景直读
+
+- Android/Web 在同一批快速采集中读取 `/sys/class/thermal/thermal_message/sconfig` 与 `screen_state`；场景优先使用 `thermal-map.conf` 索引，熄屏且 Charging 时标为未入 map 的 `chg-only（熄屏充电）`。
+- `thermal.dump` 继续提供虚拟温度/无线热控目标；`thermal.scene_source` 标记 `sconfig`、`screen_state+sconfig` 或 `thermal.dump`。Android 后台/锁屏不采集，Web 可在手机熄屏时继续记录场景。
+
+## v0.11.30 mi_thermald 场景直读
+
+- Android/Web 在同一批快速采集中读取 `/sys/class/thermal/thermal_message/sconfig` 与 `screen_state`；场景优先使用 `thermal-map.conf` 索引，熄屏且 Charging 时标为未入 map 的 `chg-only（熄屏充电）`。
+- `thermal.dump` 继续提供虚拟温度/无线热控目标；`thermal.scene_source` 标记 `sconfig`、`screen_state+sconfig` 或 `thermal.dump`。Android 后台/锁屏不采集，Web 可在手机熄屏时继续记录场景。
+
 ## v0.11.21 四路功率路径隔离
 
 - 有线/无线 × CP/Buck 四路分别过滤当前限制与详情票，CP 不再显示任何 Buck ICL/FCC。
@@ -12,7 +22,14 @@
 - 任何匹配的断开事件都会将当前 parser 状态置空，后续电流设置不会追加到已结束会话。
 - `set chg current` 在会话内保留完整首值→中间值→末值序列，单会话事件上限为 40；会话对象带 `source` 字段。
 
-最后更新：2026-08-13，目标发布版本：v0.11.28。
+最后更新：2026-08-14，目标发布版本：v0.11.29。
+
+## v0.11.29 投票日志增量读取与空窗口回退
+
+- mca_vote 从固定最新 2MiB 扫描改为按文件偏移增量读取；单次追赶上限 256KiB，保留 64KiB 重叠，日志轮转/长时间停用时回退最新 2MiB。
+- 空投票快照不清空当前限制；前端在没有投票行时使用实时/会话派生状态，并把投票数据标为待刷新，避免启动或回前台瞬间整卡消失。
+- 无线旁路回退继续显示会话内 `wireless_icl`，而不是把空投票窗口误当成没有输入限制。
+- 2026-08-14 真机前台验证（未充电、Web ADB 未运行）：APK 进程 20 秒平均约 1.1%、峰值 3%，整机约 7.4%；此前约 13.97% 的单 APK 前台基线仅作方向性对照，充电状态仍需单独复测。
 
 ## v0.11.28 有线 CP/Buck 会话路径事件
 

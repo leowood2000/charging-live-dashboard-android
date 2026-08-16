@@ -2,7 +2,19 @@
 
 直接在 Redmi K80 Pro（miro）及同类 MIUI/HyperOS root 机型上读取 sysfs、MCA 日志和 mi_thermald 状态的充电仪表盘。应用使用原生 WebView 展示，不需要 ADB、电脑或网络权限。
 
-当前版本：**v0.11.28（versionCode 75）**。
+当前版本：**v0.11.30（versionCode 77）**。
+
+## v0.11.30 mi_thermald 场景直读
+
+- 快速采集在同一条 root 批处理命令中读取 `sconfig` 与 `screen_state`，以 `thermal-map.conf` 的实际配置索引为当前场景来源；不再只依赖滚动的 `thermal.dump` 行。
+- Web/前台恢复时可识别“熄屏 + 充电”的 `chg-only（熄屏充电）` 特殊场景；Android 进入后台/锁屏仍停止采集，不增加后台功耗。
+- `thermal` JSON 增加 `sconfig`、`screen_state`、`scene_source`，保留 `thermal.dump` 的虚拟温度与无线热控目标作为取证。
+
+## v0.11.29 投票日志增量读取与空窗口回退
+
+- 前台运行时按 mca 日志文件偏移增量读取投票事件，每轮最多补读 256KiB，并保留 64KiB 重叠，避免每 10 秒重扫 2MiB。
+- 进程重启、日志轮转或长时间未打开时最多回退到最新 2MiB；空投票窗口不追赶更久历史，也不会持续增加功耗。
+- 首次打开没有 `mca_vote` 行时，当前限制仍用实时/会话派生的路径、Quick Final、RX 上限和实测值展示，并明确标注“投票日志待刷新”。
 
 ## v0.11.28 会话路径事件补全
 

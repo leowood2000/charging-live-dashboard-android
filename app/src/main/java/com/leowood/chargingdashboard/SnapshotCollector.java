@@ -11,8 +11,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -21,6 +23,8 @@ import java.util.regex.Pattern;
 public final class SnapshotCollector {
     private static final String MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log";
     private static final String THERMAL_DUMP = "/data/vendor/thermal/thermal.dump";
+    private static final String THERMAL_SCONFIG = "/sys/class/thermal/thermal_message/sconfig";
+    private static final String THERMAL_SCREEN_STATE = "/sys/class/thermal/thermal_message/screen_state";
 
     private static final String[][] NODES = {
         {"quick_charge_type", "soc:mca_business_charger/quick_charge_type", "私有快充类型", "私有快充协商", "", "text"},
@@ -53,6 +57,11 @@ public final class SnapshotCollector {
     private static final double CP_IBUS_ACTIVE_MIN_MA = 100.0;
     private static final int SESSION_MAX = 1;
     private static final int SESSION_EVENT_MAX = 40;
+    // 投票日志是事件式输出。前台运行时只补读新增内容；长时间未运行或
+    // 日志轮转后放弃追赶全部历史，最多回退到最新 2MiB。
+    private static final long VOTE_INCREMENT_MAX_BYTES = 256L * 1024L;
+    private static final long VOTE_OVERLAP_BYTES = 64L * 1024L;
+    private static final long VOTE_FALLBACK_BYTES = 2L * 1024L * 1024L;
 
     private final Deque<JSONObject> history = new ArrayDeque<>();
     /** 无锁读取的快照字符串；首次即返回 loading 状态，避免启动黑屏等待采集锁。 */
@@ -74,6 +83,10 @@ public final class SnapshotCollector {
     private volatile Long lastWlsWorkModeMs = null;
     /** 当前读取的 mca 日志文件名（mca_log_MMDD_HHMM.log），用于日志时间归一化。 */
     private volatile String lastLogFname = "";
+    /** mca_vote 增量读取游标；进程重启/长间隔超限时自动回退到最新 2MiB。 */
+    private volatile String lastVoteFile = "";
+    private volatile long lastVoteOffset = 0L;
+    private volatile boolean voteCursorReady = false;
     private volatile Integer lastWlsChgEn = null;
     /** quick wireless 最终电池电流目标 cur_max:[Final]，CP 快充路径下真正约束电流的值。 */
     private volatile Integer lastQuickCurMax = null;
@@ -788,7 +801,13 @@ public final class SnapshotCollector {
                 .append("/VIRTUAL-SENSOR-FORMULA/ { any=$0 } ")
                 .append("/MONITOR-WIRELESS/ { wls=$0 } ")
                 .append("END { if (wls != \"\") print wls; ")
-                .append("if (any != \"\" && any != wls) print any }'");
+                .append("if (any != \"\" && any != wls) print any }'; ")
+                // 与 thermal.dump 同一批 root 读取，供 Web 在熄屏时识别 chg-only；
+                // APK 进入前台时也只补读这两个轻量节点，不增加独立 su 调用。
+                .append("echo '###").append(NODES.length + 3).append("'; cat '")
+                .append(THERMAL_SCONFIG).append("' 2>/dev/null; ")
+                .append("echo '###").append(NODES.length + 4).append("'; cat '")
+                .append(THERMAL_SCREEN_STATE).append("' 2>/dev/null");
         return RootShell.exec(sb.toString(), 20);
     }
 
@@ -854,12 +873,44 @@ public final class SnapshotCollector {
                 + "-e 'target_limit_fcc_ma' "
                 + "-e 'mca_quick_charge_select_max_ibat'";
         String dir = MCA_LOG_DIR + "/";
+        // mca_vote 只在投票变化时打印。前台连续运行时按文件偏移增量读取，
+        // 每次最多补读 256KiB（含 64KiB 重叠）；进程重启、日志轮转或
+        // 间隔过大时直接回退到最新 2MiB，不追赶无限历史。
+        boolean allowOlderVoteFallback = lastVoters.length() == 0;
+        String prevVoteFile = lastVoteFile == null ? "" : lastVoteFile;
+        if (!prevVoteFile.matches("[A-Za-z0-9_.\\-]*")) prevVoteFile = "";
+        long prevVoteOffset = Math.max(0L, lastVoteOffset);
+        String votePath = dir + "${newest}";
+        String voteRead =
+                "vote_size=$(stat -c %s " + votePath + " 2>/dev/null || "
+                + "wc -c < " + votePath + "); "
+                + "vote_mode=tail; "
+                + "if [ \"$newest\" = '" + prevVoteFile + "' ] && [ \"$vote_size\" -ge "
+                + prevVoteOffset + " ] && [ $((vote_size - " + prevVoteOffset + ")) -le "
+                + VOTE_INCREMENT_MAX_BYTES + " ]; then vote_mode=incremental; fi; "
+                + "echo '__VOTE_CURSOR__${newest}|${vote_size}|${vote_mode}'; ";
+        if (allowOlderVoteFallback) {
+            voteRead += "[ -n \"${older}\" ] && tail -c " + VOTE_FALLBACK_BYTES + " " + dir
+                    + "${older} 2>/dev/null | grep -a -F 'mca_vote'; ";
+        }
+        voteRead +=
+                "if [ \"$vote_mode\" = incremental ]; then "
+                + "vote_start=$((" + prevVoteOffset + " - " + VOTE_OVERLAP_BYTES + ")); "
+                + "[ $vote_start -lt 0 ] && vote_start=0; "
+                + "vote_aligned=$((vote_start / 4096 * 4096)); "
+                + "vote_skip=$((vote_aligned / 4096)); "
+                + "vote_prefix=$((vote_start - vote_aligned)); "
+                + "vote_count=$((vote_size - vote_start)); "
+                + "dd if=" + votePath + " bs=4096 skip=$vote_skip 2>/dev/null "
+                + "| tail -c +$((vote_prefix + 1)) | head -c $vote_count "
+                + "| grep -a -F 'mca_vote'; "
+                + "else tail -c " + VOTE_FALLBACK_BYTES + " " + votePath
+                + " 2>/dev/null | grep -a -F 'mca_vote'; fi; ";
         String script = "set -- $(ls -t " + MCA_LOG_DIR + " 2>/dev/null | head -n 2); "
                 + "newest=$1; older=$2; "
                 + "echo __LOG_FILE__${newest}; "
                 + "echo __VOTE_BEGIN__; "
-                + "tail -c 2097152 " + dir + "${newest} 2>/dev/null "
-                + "| grep -a -F 'mca_vote'; echo __VOTE_END__; "
+                + voteRead + "echo __VOTE_END__; "
                 + "echo __SESSION_BEGIN__; "
                 + "{ [ -n \"${older}\" ] && tail -c 4194304 " + dir + "${older} 2>/dev/null "
                 + "| grep -a -F " + grepArgs + " | grep -v -F 'sysfs_show'; "
@@ -875,6 +926,13 @@ public final class SnapshotCollector {
         Matcher fm = Pattern.compile("__LOG_FILE__([A-Za-z0-9_.\\-]+)").matcher(raw);
         boolean fileOk = fm.find();
         if (fileOk) lastLogFname = fm.group(1);
+        Matcher vm = Pattern.compile("__VOTE_CURSOR__([A-Za-z0-9_.\\-]+)\\|(\\d+)\\|(incremental|tail)")
+                .matcher(raw);
+        if (vm.find()) {
+            lastVoteFile = vm.group(1);
+            lastVoteOffset = Long.parseLong(vm.group(2));
+            voteCursorReady = true;
+        }
         out.voteOk = fileOk && raw.contains("__VOTE_BEGIN__") && raw.contains("__VOTE_END__");
         out.sessionOk = fileOk && raw.contains("__SESSION_BEGIN__") && raw.contains("__SESSION_END__");
         out.powerPathOk = fileOk && raw.contains("__PP_BEGIN__") && raw.contains("__PP_END__");
@@ -891,6 +949,8 @@ public final class SnapshotCollector {
         JSONObject batteryRaw = new JSONObject();
         JSONObject usbRaw = new JSONObject();
         String thermalRaw = "";
+        String thermalSconfig = "";
+        String thermalScreenState = "";
         for (String part : raw) {
             if (!part.startsWith("###")) continue;
             String num = part.substring(3).split("\\s", 2)[0];
@@ -905,6 +965,10 @@ public final class SnapshotCollector {
                 usbRaw = parseUevent(body);
             } else if (i == NODES.length + 2) {
                 thermalRaw = body;
+            } else if (i == NODES.length + 3) {
+                thermalSconfig = body;
+            } else if (i == NODES.length + 4) {
+                thermalScreenState = body;
             }
         }
 
@@ -1136,11 +1200,18 @@ public final class SnapshotCollector {
             break;
         }
 
-        JSONObject thermal = parseThermalDump(thermalRaw);
+        JSONObject thermal = parseThermalDump(thermalRaw, thermalSconfig, thermalScreenState,
+                "Charging".equalsIgnoreCase(battStatus));
         if (!thermal.isNull("virtual_temp")) {
             lastThermal = new JSONObject(thermal.toString());
         } else if (!lastThermal.isNull("virtual_temp")) {
-            thermal = new JSONObject(lastThermal.toString());
+            // 虚拟温度偶发读空时保留上一温度，但不要丢掉本轮直接读取到的场景证据。
+            JSONObject merged = new JSONObject(lastThermal.toString());
+            for (String key : new String[]{"scene", "scene_source", "sconfig", "screen_state"}) {
+                if (!thermal.isNull(key)) merged.put(key, thermal.get(key));
+            }
+            lastThermal = new JSONObject(merged.toString());
+            thermal = merged;
         }
 
         return new JSONObject()
@@ -2207,7 +2278,9 @@ public final class SnapshotCollector {
                 .put("d_boundary", dBoundary);
     }
 
-    private static final java.util.Map<String, String> THERMAL_SCENES = new java.util.HashMap<>();
+    private static final Map<String, String> THERMAL_SCENES = new HashMap<>();
+    /** mi_thermald thermal-map.conf 的 sconfig 索引；熄屏充电是特殊分支，不在此表内。 */
+    private static final Map<Integer, String> THERMAL_CONFIG_SCENES = new HashMap<>();
     static {
         THERMAL_SCENES.put("MONITOR-WIRELESS", "normal（日常）");
         THERMAL_SCENES.put("CHARGE-MONITOR-WIRELESS", "charge（充电中）");
@@ -2235,6 +2308,80 @@ public final class SnapshotCollector {
         THERMAL_SCENES.put("PER-VIDEO-MONITOR-WIRELESS", "per-video（性能视频）");
         THERMAL_SCENES.put("CCLASSVIDEO-MONITOR-WIRELESS", "cclassvideo（连续视频）");
         THERMAL_SCENES.put("CGAME-MONITOR-WIRELESS", "cgame（连续游戏）");
+        putThermalConfig(0, "normal（日常）");
+        putThermalConfig(1, "huanji（幻迹）");
+        putThermalConfig(2, "abnormal（异常）");
+        putThermalConfig(3, "nightvideo（夜间录像）");
+        putThermalConfig(4, "dolbyvision（杜比视界）");
+        putThermalConfig(5, "phone（通话）");
+        putThermalConfig(6, "nolimits（无限制）");
+        putThermalConfig(7, "class0");
+        putThermalConfig(8, "youtube");
+        putThermalConfig(9, "arvr（AR/VR）");
+        putThermalConfig(10, "navigation（导航）");
+        putThermalConfig(11, "video（视频）");
+        putThermalConfig(12, "demo（演示）");
+        putThermalConfig(13, "sptm（SPTM）");
+        putThermalConfig(14, "videochat（视频通话）");
+        putThermalConfig(15, "camera（相机）");
+        putThermalConfig(16, "4k（4K 录像）");
+        putThermalConfig(17, "4k（4K 录像）");
+        putThermalConfig(18, "tgame（重度游戏）");
+        putThermalConfig(19, "mgame（中度游戏）");
+        putThermalConfig(20, "yuanshen（原神）");
+        putThermalConfig(25, "xingtie（星穹铁道）");
+        putThermalConfig(26, "highfps（高帧率）");
+        putThermalConfig(27, "charge（充电中）");
+        putThermalConfig(50, "per-normal（性能常规）");
+        putThermalConfig(52, "per-abnormal（性能异常）");
+        putThermalConfig(57, "per-class0（性能 Class0）");
+        putThermalConfig(58, "per-youtube（性能 YouTube）");
+        putThermalConfig(60, "per-navigation（性能导航）");
+        putThermalConfig(61, "per-video（性能视频）");
+        putThermalConfig(76, "highfps（高帧率）");
+        String[] base = {"normal（日常）", "huanji（幻迹）", "abnormal（异常）", "nightvideo（夜间录像）",
+                "dolbyvision（杜比视界）", "phone（通话）", "nolimits（无限制）", "class0", "youtube",
+                "arvr（AR/VR）", "navigation（导航）", "video（视频）", "demo（演示）", "sptm（SPTM）",
+                "videochat（视频通话）", "camera（相机）", "4k（4K 录像）", "4k（4K 录像）",
+                "tgame（重度游戏）", "mgame（中度游戏）", "yuanshen（原神）"};
+        for (int i = 0; i < base.length; i++) {
+            putThermalConfig(100 + i, base[i] + "（折叠屏展开）");
+            putThermalConfig(200 + i, "iec-" + base[i]);
+            putThermalConfig(300 + i, "iec-" + base[i] + "（折叠屏展开）");
+        }
+        putThermalConfig(125, "xingtie（星穹铁道，折叠屏展开）");
+        putThermalConfig(126, "highfps（高帧率，折叠屏展开）");
+        putThermalConfig(150, "per-normal（性能常规，折叠屏展开）");
+        putThermalConfig(152, "per-abnormal（性能异常，折叠屏展开）");
+        putThermalConfig(157, "per-class0（性能 Class0，折叠屏展开）");
+        putThermalConfig(158, "per-youtube（性能 YouTube，折叠屏展开）");
+        putThermalConfig(160, "per-navigation（性能导航，折叠屏展开）");
+        putThermalConfig(161, "per-video（性能视频，折叠屏展开）");
+        putThermalConfig(250, "iec-per-normal（性能常规）");
+        putThermalConfig(252, "iec-per-abnormal（性能异常）");
+        putThermalConfig(257, "iec-per-class0（性能 Class0）");
+        putThermalConfig(258, "iec-per-youtube（性能 YouTube）");
+        putThermalConfig(260, "iec-per-navigation（性能导航）");
+        putThermalConfig(261, "iec-per-video（性能视频）");
+        putThermalConfig(350, "iec-per-normal（性能常规，折叠屏展开）");
+        putThermalConfig(352, "iec-per-abnormal（性能异常，折叠屏展开）");
+        putThermalConfig(357, "iec-per-class0（性能 Class0，折叠屏展开）");
+        putThermalConfig(358, "iec-per-youtube（性能 YouTube，折叠屏展开）");
+        putThermalConfig(360, "iec-per-navigation（性能导航，折叠屏展开）");
+        putThermalConfig(361, "iec-per-video（性能视频，折叠屏展开）");
+        putThermalConfig(500, "hp-normal（高性能常规）");
+        putThermalConfig(501, "hp-mgame（高性能中度游戏）");
+        putThermalConfig(600, "hp-normal（高性能常规，折叠屏展开）");
+        putThermalConfig(601, "hp-mgame（高性能中度游戏，折叠屏展开）");
+        putThermalConfig(700, "cgame（连续游戏）");
+        putThermalConfig(701, "cclassvideo（连续视频）");
+        putThermalConfig(702, "comp（性能压测）");
+        putThermalConfig(708, "cvideo（连续视频）");
+        putThermalConfig(800, "cgame（连续游戏，折叠屏展开）");
+        putThermalConfig(801, "cclassvideo（连续视频，折叠屏展开）");
+    }
+    private static void putThermalConfig(int index, String scene) {
+        THERMAL_CONFIG_SCENES.put(index, scene);
     }
     private static final Pattern THERMAL_WLS_RE = Pattern.compile(
             "\\[([A-Z0-9\\-]*MONITOR-WIRELESS)\\]\\[VIRTUAL-SENSOR-FORMULA (\\d+)\\]");
@@ -2242,10 +2389,16 @@ public final class SnapshotCollector {
             "\\[([A-Z0-9\\-]+)\\]\\[VIRTUAL-SENSOR-FORMULA (\\d+)\\]");
     private static final Pattern THERMAL_TARGET_RE = Pattern.compile("\\[wireless_charge (\\d+)\\]");
 
-    private JSONObject parseThermalDump(String text) throws JSONException {
+    private JSONObject parseThermalDump(String text, String sconfigRaw,
+                                         String screenStateRaw, boolean charging) throws JSONException {
         JSONObject r = new JSONObject()
                 .put("scene", JSONObject.NULL).put("virtual_temp", JSONObject.NULL)
-                .put("target", JSONObject.NULL);
+                .put("target", JSONObject.NULL).put("scene_source", JSONObject.NULL)
+                .put("sconfig", JSONObject.NULL).put("screen_state", JSONObject.NULL);
+        Integer sconfig = parseIntOrNull(sconfigRaw);
+        Integer screenState = parseIntOrNull(screenStateRaw);
+        if (sconfig != null) r.put("sconfig", sconfig);
+        if (screenState != null) r.put("screen_state", screenState);
         for (String line : text.split("\n")) {
             Matcher m = THERMAL_WLS_RE.matcher(line);
             if (m.find()) {
@@ -2262,7 +2415,25 @@ public final class SnapshotCollector {
                 r.put("target", JSONObject.NULL);
             }
         }
+        // sconfig 是 mi_thermald 的实际配置索引，比 thermal.dump 里滚动的旧行可靠。
+        // 屏幕熄灭且仍在充电时，mi_thermald 走未入 map 的 thermal-chg-only 特殊分支。
+        if (screenState != null && screenState == 0 && charging) {
+            r.put("scene", "chg-only（熄屏充电）").put("scene_source", "screen_state+sconfig");
+        } else if (sconfig != null && THERMAL_CONFIG_SCENES.containsKey(sconfig)) {
+            r.put("scene", THERMAL_CONFIG_SCENES.get(sconfig)).put("scene_source", "sconfig");
+        } else if (!r.isNull("scene")) {
+            r.put("scene_source", "thermal.dump");
+        }
         return r;
+    }
+
+    private static Integer parseIntOrNull(String raw) {
+        try {
+            String value = raw == null ? "" : raw.trim();
+            return value.isEmpty() ? null : Integer.parseInt(value);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private static String thermalSceneForSegment(String segment) {
